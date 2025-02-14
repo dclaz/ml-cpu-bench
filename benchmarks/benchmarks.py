@@ -45,9 +45,11 @@ def run_benchmark(task, task_name, n_runs=1):
     print(f"Task: {task_name}, Results: {results}")
     return {task_name: results}
 
+
 ####################################################################################################
 # Actual benchmarks below
 ####################################################################################################
+
 
 def matrix_multiplication_benchmark(matrix_size=5000):
     """Benchmarks matrix multiplication."""
