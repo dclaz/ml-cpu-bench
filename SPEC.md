@@ -76,27 +76,48 @@ Only meaningful on heterogeneous CPUs (Apple Silicon; Intel hybrid, 12th-gen+). 
 homogeneous CPUs `p`/`e` are no-ops equal to `all`, and the report omits the p-core / E-core
 sections entirely rather than emitting null rows.
 
+**Detection fallback — when in doubt, homogeneous.** P/E detection is best-effort. If the
+platform exposes no usable signal (no sysfs `cpu_capacity` / core-type flags on Linux, no
+CPU-set efficiency class on Windows, no `hw.perflevel*` on macOS) **or** the signal reports a
+single uniform core type, the CPU is treated as **homogeneous**: `perf_cores` / `eff_cores`
+are recorded as `null`, `--cores p`/`e` collapse to `all`, and the heterogeneous-only blocks
+(`p_cores`, `e_core_delta`, the E-CORE CONTRIBUTION section) are omitted. We never *guess* a
+P/E split from core counts or model strings — an uncertain detection is reported as
+homogeneous rather than producing an unreliable split.
+
 **Enforcement differs by OS, and the runner reports what it actually achieved, never what it
-requested:**
+requested.** `affinity.py` exposes enforcement as a **modular per-platform backend**
+(detect → apply pin/QoS → verify residency), so the soft macOS P-core path (see §13) can be
+improved later without touching the runner, scoring, or report:
 
 - **Linux / Windows — hard pinning (enforced).** Detect P vs E cores (Linux: sysfs
   `cpu_capacity` / core-type flags; Windows: CPU-set efficiency class) and pin via
   `sched_setaffinity` / `SetThreadAffinityMask` (both wrapped by `psutil.cpu_affinity`).
   `--cores p` means strictly P-cores.
 - **macOS — best-effort, no hard affinity.** macOS exposes no API to pin a thread to a core
-  or core *type*; `psutil.cpu_affinity` is unavailable there. The only lever is QoS class:
-  - `--cores p` ⇒ high QoS (`USER_INITIATED`) + thread count capped at the P-core count. This
-    *biases* strongly toward P-cores in steady state but is **not** a guarantee.
-  - `--cores e` ⇒ background QoS, which macOS confines to E-cores fairly reliably (so E-cores
-    are actually easier to isolate than P-cores on Apple Silicon).
+  or core *type*; `psutil.cpu_affinity` is unavailable there. The only lever is QoS class, and
+  because each config already runs as its own subprocess we set it **at spawn time via the
+  `taskpolicy(8)` CLI** rather than reaching into `libSystem` from Python (no `ctypes`, no
+  sudo):
+  - `--cores e` ⇒ launch the worker under `taskpolicy -b` (background QoS). macOS confines
+    background work to E-cores fairly reliably, so E-cores are actually *easier* to isolate
+    than P-cores on Apple Silicon.
+  - `--cores p` ⇒ run at the default/`USER_INITIATED` QoS (no `taskpolicy` flag) with the
+    thread count capped at the P-core count. There is **no shell lever that forces P-cores**;
+    default QoS merely *biases* toward them in steady state. This is reported as `biased`, not
+    a guarantee, and is checked by residency sampling below.
+  - Single-thread P placement (§2.1) uses the same default-QoS path; on macOS it is best-effort.
 - **Verification (all platforms, macOS especially).** During each timed region the runner
-  samples per-core busy time (`host_processor_info` on macOS — no sudo; sysfs/PDH elsewhere)
-  and records the fraction of work that landed on the "wrong" core type. The sampler runs at
-  **low frequency and, where possible, off the cores under test**, so it does not perturb the
-  measurement it is verifying. Each result carries an `enforcement` field: `none` (cores=all,
-  no isolation requested), `pinned` (hard affinity), or `biased` (QoS), plus the measured
-  `offcore_residency_pct`. A high off-core residency flags the P-isolation as leaky so the
-  number can be discounted rather than trusted blindly.
+  measures the fraction of work that landed on the "wrong" core type via `psutil.cpu_times(percpu=True)`
+  (sysfs/PDH/`host_processor_info` underneath — no sudo). Concretely: a low-priority sampler
+  thread takes per-core busy-time deltas at a fixed **10 Hz** (100 ms) cadence, **active only
+  while `ctx.timer()` is open**. On Linux/Windows the sampler thread is pinned to the
+  **complement** of the cores under test so it does not steal a test core; on macOS it runs
+  unpinned at background QoS. `offcore_residency_pct = busy_on_wrong_type / total_busy` over
+  the timed window. Each result carries an `enforcement` field: `none` (cores=all, no isolation
+  requested), `pinned` (hard affinity), or `biased` (QoS), plus the measured
+  `offcore_residency_pct`. A run with `enforcement="biased"` and `offcore_residency_pct > 10%`
+  is flagged **leaky** in the report so the number can be discounted rather than trusted blindly.
 
 ### 2.3 Pre-import thread control
 Thread *count* is enforced in the worker subprocess **before any heavy import**, by setting:
@@ -133,11 +154,13 @@ reported alongside the single-core score and the direct E-core throughput measur
 `--cores e`), giving the triplet — single-P-core / E-core / all-cores — that actually
 characterises the chip.
 
-> **Producing the triplet in one run.** On a detected heterogeneous CPU, a single
-> `cpubench run` auto-expands to the configs needed to populate the full `scores` block
-> (single-core, all-cores, and p-cores; plus e-cores when requested). The user does not have
-> to stitch multiple invocations together, and the report's triplet is guaranteed
-> self-consistent.
+> **Producing the all-cores/p-cores pair in one run.** On a detected heterogeneous CPU, a
+> single `cpubench run` auto-expands to the configs needed for the cross-machine block
+> (all-cores and p-cores; plus e-cores when requested), so the user does not have to stitch
+> multiple invocations together. The **single-P-core** leg of the triplet is still gated
+> behind `--sweep` (consistent with §1.5/§2.1/§8): a plain run reports the E / all-cores
+> pair and the p-core overall, and the full single-P / E / all-cores triplet appears only
+> when `--sweep` is also passed.
 
 ---
 
@@ -192,19 +215,23 @@ contamination.
   never to stdout. stdout/stderr are reserved for library chatter (LightGBM, OpenMP banners,
   BLAS info, warnings), which would otherwise corrupt a stdout-parsed result line. The
   presence of the partial file is also what `--resume` checks to skip completed configs.
-- **Watchdog.** Each config has a generous hard wall-clock kill (a safety ceiling, distinct
-  in purpose from the removed rep budget: it only prevents an infinite hang, e.g. a
-  single-thread solver on a slow machine). On timeout, OOM-kill (SIGKILL, no result file), or
-  any non-zero worker exit, the controller records `status: "failed"` and moves on rather than
-  blocking the suite.
+- **Per-config timeout (`--timeout SECONDS`, default 3600 = 1 h).** A generous wall-clock
+  ceiling whose *only* purpose is to stop a hung or pathologically slow worker from blocking the
+  whole suite — **not** a per-task time budget (reps still run to completion). On timeout the
+  controller kills the worker and records `status: "failed"` (no result file), then moves on;
+  `--resume` re-attempts nothing already marked done. `--timeout 0` disables it. Sizes are still
+  tuned so every config finishes comfortably inside this ceiling on the range of target
+  machines; the timeout is the safety net, not the schedule. The same `failed` path covers
+  OOM-kill (SIGKILL) and any non-zero worker exit.
 
 ### Memory safety
 - **Headroom by design.** Large-tier sizes target peak RSS ≤ ~8 GB. Target machines typically
-  have **> 16 GB RAM**, so this leaves ample headroom; the guard below is a safety net rather
-  than a tight constraint.
-- **Pre-task guard.** Before spawning a worker, estimate the task's footprint and compare to
-  currently available RAM minus a reserve (default 2 GB). If it wouldn't fit, the task is
-  **skipped** with `status: "skipped_memory"` rather than risking a swap storm.
+  have **> 16 GB RAM**, so this leaves ample headroom.
+- **No pre-task estimate guard.** There is no `mem_estimate` and no `skipped_memory` status.
+  Instead, every config records its observed `peak_rss_mb`, and we **tune sizes down to the
+  target machines from those measurements** ("measure then tune"). A task that is genuinely too
+  big for a machine simply OOM-fails (`status: "failed"`) and is excluded; it does not hang the
+  suite.
 - **Swap detection.** The runner samples swap-in/out counters around the timed region; if the
   OS swapped during a task, the result is flagged `swapped: true` and excluded from scoring,
   since it measures the disk, not the CPU.
@@ -212,16 +239,20 @@ contamination.
 ### Other harness behaviours
 - **Targeted imports.** Each worker imports only the libraries its task needs (e.g. the
   LightGBM stack is never imported for a linalg task), so slow imports don't tax the budget.
-- **Per-task correctness checksum.** Each task returns a cheap invariant (e.g. KMeans inertia,
-  model loss, output-array shape + a summary statistic). Stored per result; `compare` uses it
-  to detect when two runs did *different work* (e.g. a library version changed convergence),
-  preventing an algorithmic change from masquerading as a CPU speedup. Invariants are
-  **tolerant** (rounded) so parallel-reduction / thread-count last-bit differences don't
-  false-positive, while a real convergence change still trips it — the tolerance is calibrated
-  per task when the invariant is chosen.
-- **Incremental, resumable output.** Results stream to a JSONL file as each config completes;
-  the final JSON is assembled at the end. A crash or OOM partway through a long run preserves
-  everything already done, and `--resume` skips completed configs.
+- **Per-task checksum (optional, informational).** A task *may* return a cheap summary value
+  (e.g. KMeans inertia, model loss, output-array shape + a summary statistic), stored per
+  result. This is **informational only** — we are after high-level speed measures, not
+  numerical validation, so there is **no per-task tolerance calibration** and `compare` does
+  **not refuse** on a checksum difference (it surfaces any difference as a note; see §6).
+  Correctness is guarded instead by the `tests/` smoke suite, which asserts each task returns
+  the expected output shape/dtype in `quick` mode (§11).
+- **Incremental, resumable output.** The **per-config partial files** (`results/.partial/<config_id>.json`,
+  one per completed config) *are* the incremental stream and the single source of truth for
+  resume — there is no separate JSONL log. As each worker finishes it leaves its partial file;
+  `--resume` decides what to skip purely by which partial files already exist (a `failed`
+  config leaves no file and is re-attempted). At the end of the run the controller assembles
+  the authoritative schema-v1 JSON (§7.1) from all partial files. A crash or OOM partway
+  through a long run therefore preserves everything already done.
 - **Quiet-machine pre-flight.** Before starting, sample system-wide CPU load; warn if the
   machine isn't idle and record the baseline load in metadata.
 
@@ -233,7 +264,7 @@ A single `--mode` selects both which tasks run and how big. Two modes:
 
 | Mode | Tasks | Sizes | Typical use |
 |---|---|---|---|
-| `quick` | fast subset (excludes multiclass LightGBM, `sp_lasso_cv`) | `quick` column | CI / sanity |
+| `quick` | fast subset (excludes the long-runners tagged "normal only" in §5: `md_gpr`, `md_lgbm_multi`, `nlp_lda`, `sp_lasso_cv`) | `quick` column | CI / sanity |
 | `normal` *(default)* | every task | `normal` column | the real benchmark |
 
 Both modes now cover the **same 6 categories** (data-prep, linalg, factorization, clustering,
@@ -306,14 +337,14 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 > native frame from the same arrays, so they operate on identical input; frame construction is
 > outside the timed region.
 
-> **FE fairness & correctness.** (1) The pandas and Polars variants must compute *provably
-> equivalent* features — `closed="left"`, `min_periods`, and start-of-group NaN handling differ
-> subtly between the two engines — so a `tests/` check asserts their outputs match within
-> tolerance on a sample; otherwise the comparison isn't apples-to-apples. (2) The FE pipeline
-> adds many columns, which is an in-place-mutation trap under the no-reset rule (§3): each rep
-> must build features into a fresh structure, never mutate the shared panel. (3) Checksums are
-> tolerant invariants (rounded `feature_sum` / `feature_mean` over a couple of output columns);
-> pandas and Polars may differ in the last bits, which is fine since they are separate tasks.
+> **FE fairness & correctness.** (1) The pandas and Polars variants should compute the *same
+> logical feature* (same windows, lags, `closed="left"` intent, `min_periods`), but **exact
+> numerical equivalence between the engines is not required or asserted** — start-of-group NaN
+> handling and last-bit differences are accepted, since the two are scored as separate entries
+> and we measure speed, not agreement. (2) The FE pipeline adds many columns, which is an
+> in-place-mutation trap under the no-reset rule (§3): each rep must build features into a fresh
+> structure, never mutate the shared panel. (3) Any checksum returned is informational (§3) —
+> the two engines may differ, which is fine.
 
 ### 5.2 Dense linear algebra — NumPy / SciPy (BLAS/LAPACK stress)
 
@@ -331,7 +362,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 
 | Task | Op | Sizes (n_samples × n_features), components — quick → normal |
 |---|---|---|
-| `mf_truncated_svd` | `TruncatedSVD` | 20k×500 → 100k×2000, k=50 |
+| `mf_tsvd` | `TruncatedSVD` | 20k×500 → 100k×2000, k=50 |
 | `mf_pca` | `PCA` (full) | same shapes, k=50 |
 | `mf_nmf` | `NMF` (nndsvda, max_iter 200) | 5k×500 → 20k×2000, k=20 |
 
@@ -340,7 +371,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 | Task | Op | Sizes — quick → normal |
 |---|---|---|
 | `cl_kmeans` | `KMeans` (n_init=3, max_iter=100) | 100k×20, k=25 → 600k×50, k=100 |
-| `cl_minibatch_kmeans` | `MiniBatchKMeans` (batch 1024) | 300k, k=25 → 3M, k=100 |
+| `cl_mbkmeans` | `MiniBatchKMeans` (batch 1024) | 300k, k=25 → 3M, k=100 |
 | `cl_optics` | `OPTICS` (min_samples=10, ball_tree, bounded `max_eps`, `n_jobs` honoured) | 10k → 30k × 10 *(O(n²)-bounded)* |
 | `cl_gmm` | `GaussianMixture` (full cov) | 50k×10, comp 10 → 200k×10, comp 30 |
 
@@ -358,20 +389,20 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 | `md_ridge` | `RidgeCV` | same as linreg |
 | `md_lasso` | `LassoCV` (coordinate descent) | same as linreg |
 | `md_logreg` | `LogisticRegression` (lbfgs, 3-class) | 200k×50 → 800k×150 |
-| `md_bayesian_ridge` | `BayesianRidge` (Bayesian linear regression, ARD-style hyperprior) | 200k×100 → 1M×300 |
+| `md_bayes_ridge` | `BayesianRidge` (Bayesian linear regression, ARD-style hyperprior) | 200k×100 → 1M×300 |
 | `md_gpr` | `GaussianProcessRegressor` (RBF kernel, `optimizer=None`, 1000 predict pts) *(O(n³) kernel Cholesky — backend-sensitive; `normal` only)* | n_train 2k×20 → 10k×20 |
-| `md_random_forest` | `RandomForestClassifier` | 100k×50, 100 trees → 200k×50, 300 trees |
-| `md_random_forest_predict` | `RandomForestClassifier.predict` — forest **trained untimed** on 200k×50 / 300 trees; timed region scores a large `X_test` (`n_jobs` honoured over trees) | predict rows 500k×50 → 5M×50 |
+| `md_rf` | `RandomForestClassifier` | 100k×50, 100 trees → 200k×50, 300 trees |
+| `md_rf_predict` | `RandomForestClassifier.predict` — forest **trained untimed** on 200k×50 / 300 trees; timed region scores a large `X_test` (`n_jobs` honoured over trees) | predict rows 500k×50 → 5M×50 |
 | `md_hist_gbm` | `HistGradientBoostingClassifier` | 200k×50, 100 iters → 1M×100, 300 iters |
-| `md_lightgbm` | LightGBM, **regression** (`num_threads` honoured) | 200k×50, 100 trees → 500k×100, 500 trees |
-| `md_lightgbm_multiclass` | LightGBM, **multiclass softmax, `num_class=10`** *(builds num_class × rounds trees; `normal` only)* | 200k×50, 250 rounds *(normal only)* |
+| `md_lgbm` | LightGBM, **regression** (`num_threads` honoured) | 200k×50, 100 trees → 500k×100, 500 trees |
+| `md_lgbm_multi` | LightGBM, **multiclass softmax, `num_class=10`** *(builds num_class × rounds trees; `normal` only)* | 200k×50, 250 rounds *(normal only)* |
 | `md_svc_rbf` | `SVC` RBF *(single-threaded dominator — kept small)* | 5k×30 → 15k×30 |
 | `md_knn` | `KNeighborsClassifier` brute, 1000 queries | 50k×50 → 200k×50 |
 
-> `md_random_forest_predict` measures **inference**, a distinct workload from training: tree
+> `md_rf_predict` measures **inference**, a distinct workload from training: tree
 > traversal that is cache-, latency-, and branch-prediction-bound rather than compute-bound, and
 > the common production case where a model is trained once and scores many rows. The forest is
-> trained untimed on a modest set (the same 200k×50 / 300-tree shape as `md_random_forest`) so
+> trained untimed on a modest set (the same 200k×50 / 300-tree shape as `md_rf`) so
 > the untimed setup isn't pathological; only `predict` on the large `X_test` is timed, and it
 > parallelizes over trees via `n_jobs`. Checksum is `{rows, prediction_sum}` — exact and
 > deterministic on a given build (cross-architecture it may differ if the trained forest differs
@@ -386,7 +417,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 > Cholesky, `md_gpr` is tagged backend-sensitive for `compare` even though it lives in the
 > models category** (see §6). Checksum is the rounded log-marginal-likelihood.
 
-> `md_lightgbm_multiclass` data is 10 Gaussian class blobs (centroids drawn via
+> `md_lgbm_multi` data is 10 Gaussian class blobs (centroids drawn via
 > `default_rng`, then sampled around them) so the classes are learnable and stable across
 > library versions. At `num_class=10` × 250 rounds it builds ~2,500 trees (more than the
 > binary/regression task); it is excluded from `quick`. Its
@@ -403,12 +434,12 @@ for the text tasks — all seeded for stability. No new dependencies.
 | Task | Op | Sizes (n_samples × n_features), density — quick → normal |
 |---|---|---|
 | `sp_tfidf` | `TfidfVectorizer.fit_transform` on a synthetic Zipfian token corpus | 50k docs → 300k docs; vocab 30k; ~80 tokens/doc |
-| `sp_hashing_vectorizer` | `HashingVectorizer.transform` (n_features=2²⁰) on the Zipfian token corpus | 50k docs → 300k docs; ~80 tokens/doc |
-| `sp_feature_hasher` | `FeatureHasher` (input_type='string', n_features=2²⁰) on high-cardinality categorical rows | 200k×20 fields → 1M×30 fields; cardinality ~1e6/field |
+| `sp_hashvec` | `HashingVectorizer.transform` (n_features=2²⁰) on the Zipfian token corpus | 50k docs → 300k docs; ~80 tokens/doc |
+| `sp_fhash` | `FeatureHasher` (input_type='string', n_features=2²⁰) on high-cardinality categorical rows | 200k×20 fields → 1M×30 fields; cardinality ~1e6/field |
 | `sp_matmul` | sparse CSR × dense product (SpMM primitive) | 100k×30k → 200k×50k @ 0.2%, dense rhs × 64 |
-| `sp_truncated_svd` | `TruncatedSVD` (randomized) on sparse CSR (LSA use case) | 50k×10k → 200k×50k @ 0.3%, k=100 |
+| `sp_tsvd` | `TruncatedSVD` (randomized) on sparse CSR (LSA use case) | 50k×10k → 200k×50k @ 0.3%, k=100 |
 | `sp_nmf` | `NMF` (k=20) on a sparse TF-IDF doc-term matrix (topic model) | 20k×10k → 100k×30k @ derived density |
-| `sp_logreg_saga` | `LogisticRegression` (saga solver) on sparse input, binary | 50k×10k → 200k×50k @ 0.3% |
+| `sp_saga` | `LogisticRegression` (saga solver) on sparse input, binary | 50k×10k → 200k×50k @ 0.3% |
 | `nlp_lda` | `LatentDirichletAllocation` (n_components=20, batch, `n_jobs` honoured) on a sparse doc-term matrix *(variational Bayes; `normal` only)* | 20k docs → 100k docs; vocab 10k → 30k |
 | `sp_lasso_cv` | `LassoCV` (cv=5, n_alphas=50, `n_jobs` honoured) on sparse regression data *(CV multiplies work; `normal` only)* | 20k×1k → 100k×10k @ 0.5% |
 
@@ -416,7 +447,7 @@ for the text tasks — all seeded for stability. No new dependencies.
 > genuinely different code path from the dense `mf_nmf` — sparse multiplicative/coordinate
 > updates rather than dense BLAS — so the two don't duplicate each other.
 
-> `sp_hashing_vectorizer` and `sp_feature_hasher` both exercise the hashing-trick path: a
+> `sp_hashvec` and `sp_fhash` both exercise the hashing-trick path: a
 > stateless `transform` (no `fit`, no vocabulary), deterministic (MurmurHash), and
 > **single-threaded** in scikit-learn — so, like `md_svc_rbf`, they measure raw per-core
 > hashing throughput even inside an all-cores run. The vectorizer hashes a token stream; the
@@ -424,15 +455,15 @@ for the text tasks — all seeded for stability. No new dependencies.
 > data is encoded into a fixed sparse space without building a category dictionary. Because the
 > transform is deterministic, their checksums are **exact** (output shape + nnz), not tolerant.
 >
-> **`sp_feature_hasher` sizing caveat.** Its input is an iterable of per-row feature lists;
+> **`sp_fhash` sizing caveat.** Its input is an iterable of per-row feature lists;
 > keeping data generation untimed means materializing that input, which for high-cardinality
 > data is millions of short Python strings — and *that* materialization, not the compact sparse
 > output, is the real memory driver. Sizes are bounded with that in mind (e.g. `normal` is
-> 1M×30 ≈ 30M tokens), and the task's `mem_estimate` accounts for the materialized input rather
-> than only the output matrix.
+> 1M×30 ≈ 30M tokens), and its `peak_rss_mb` will be dominated by that materialized input rather
+> than the compact sparse output — so size-tuning watches the input, not the output matrix.
 
 > `nlp_lda` is topic modeling by variational Bayes, so it also serves as a second Bayesian
-> method (alongside `md_bayesian_ridge` and `md_gpr`). The batch variant parallelizes the
+> method (alongside `md_bayes_ridge` and `md_gpr`). The batch variant parallelizes the
 > E-step across documents (`n_jobs`), giving another work-stealing probe for E-core
 > contribution. Excluded from `quick`. Checksum is a tolerant invariant (rounded perplexity).
 
@@ -451,9 +482,9 @@ cpubench run            [--mode quick|normal]
                         [--threads N | --sweep] [--cores all|p|e]
                         [--tasks t1,t2,...] [--exclude t1,...]
                         [--repeat N] [--seed S] [--cooldown SECONDS]
-                        [--no-warmup] [--resume]
+                        [--timeout SECONDS] [--no-warmup] [--resume]
                         [--out results/<timestamp>.json]
-                        [--report txt|md|html] [--summary] [--no-report]
+                        [--format txt|md|html] [--summary] [--no-report]
 cpubench list           # list tasks + categories + sizes
 cpubench report FILE    # (re)render from a results JSON; [--format txt|md|html] [--summary]
 cpubench compare A B    # diff two runs; see below
@@ -461,17 +492,20 @@ cpubench env            # print detected environment + backend only
 ```
 
 Entry point installed as `cpubench` (also `python -m cpubench`). `--repeat` sets the fixed
-number of timed reps (default 5); `--no-warmup` disables the default-on warm-up run. A
+number of timed reps (default 5); `--timeout SECONDS` is the per-config hang ceiling (default
+3600; `0` disables); `--no-warmup` disables the default-on warm-up run. A
 **plain-text report is written next to the JSON and printed to the console by default** (§7.3);
-`--report md|html` additionally emits those; `--summary` restricts output to the shareable
-header + score block (no per-task table).
+`--format md|html` additionally emits those (the flag is named `--format` on both `run` and
+`report` for consistency); `--summary` restricts output to the shareable header + score block
+(no per-task table); `--no-report` suppresses report generation entirely.
 
 `compare` is **noise-aware and safe**: it refuses (or warns) when `benchmark_version`,
-`reference_version`, or `mode` differ, or when a task's `checksum` differs (different work,
-not a CPU difference); flags a per-task regression only when the gap exceeds the combined
-run-to-run variance of both runs; and segments the diff into **backend-sensitive** vs
-**backend-neutral** groups so an Accelerate-vs-OpenBLAS comparison isn't misread as a CPU
-difference. Backend-sensitivity is a **per-task tag** (set in the registry), not inferred from
+`reference_version`, or `mode` differ; flags a per-task regression only when the gap exceeds
+the combined run-to-run variance of both runs; and segments the diff into **backend-sensitive**
+vs **backend-neutral** groups so an Accelerate-vs-OpenBLAS comparison isn't misread as a CPU
+difference. If both runs carry a per-task checksum and they differ, `compare` notes it
+informationally (possible different work) but does **not** refuse — checksums are informational
+(§3). Backend-sensitivity is a **per-task tag** (set in the registry), not inferred from
 category: it covers linalg and dense factorization, plus `md_gpr` (whose time is dominated by
 the dense kernel Cholesky). Tree models, data-prep, clustering, and the sparse/NLP tasks —
 whose heavy work is the sparse matmul, not dense BLAS — are backend-neutral.
@@ -488,8 +522,13 @@ whose heavy work is the sparse matmul, not dense BLAS — are backend-neutral.
   "reference_version": "ref-2026.06",      // identity of baselines/reference.json; compare refuses on mismatch
   "run_id": "2026-06-14T03-22-10Z_ab12cd",
   "config": { "mode": "normal", "threads_mode": "all",
+              // threads_mode ∈ { "all" (physical-all, the default), "single" (--threads 1),
+              //   "explicit" (--threads N, neither 1 nor physical-all → no scored bucket) }.
+              // --sweep runs both "all" and "single" as two separate configs; each result
+              // carries its own threads_mode + threads. The heterogeneous auto-expanded
+              // p-core pass is threads_mode "all" with cores="p" (it is NOT its own mode).
               "threads": 12, "cores": "all", "seed": 1337, "repeat": 5,
-              "warmup": true, "cooldown_s": 2 },
+              "warmup": true, "cooldown_s": 2, "timeout_s": 3600 },
   "environment": {
     "cpu_model": "...", "arch": "arm64|x86_64",
     "logical_cores": 12, "physical_cores": 12,   // equal on Apple Silicon (no SMT)
@@ -511,17 +550,22 @@ whose heavy work is the sparse matmul, not dense BLAS — are backend-neutral.
       "std_s": 0.012, "cv": 0.006, "peak_rss_mb": 1620.4,
       "cpu_wall_ratio": 11.4, "swapped": false,
       "status": "ok", "noisy": false, "error": null }
-      // status also: "skipped_memory" | "failed"
+      // status also: "failed"   (OOM / non-zero exit / manual interrupt)
     // ...
   ],
   "scores": {
-    // headline = 100 × geomean(by_category values) — category-weighted, not task-weighted
+    // headline = 100 × geomean(by_category values) — category-weighted, not task-weighted.
+    // Only the canonical thread configs get a scored bucket:
+    //   threads_mode "all" → all_cores ;  --threads 1 → single_core ;  --sweep → both.
+    // A non-standard --threads N (neither 1 nor physical-all) has NO reference denominator,
+    // so it produces raw times + intra-run ratios only and the "scores" block is omitted
+    // (report labels it "threads=N (non-standard — raw times only)"). See §8.
     "all_cores":   { "headline": 142.0,
                      "by_category": { "linalg": 1.71, "clustering": 1.20, /* ...6 total */ },
                      "per_task": { "la_gemm": 1.55, /* ... */ } },
     "single_core": { "headline": 96.0,  "by_category": { /* ... */ }, "per_task": { /* ... */ } },  // if --sweep
     "p_cores":     { "headline": 138.0, "by_category": { /* ... */ }, "per_task": { /* ... */ } },  // heterogeneous; shares the all-cores reference denominator
-    "e_core_delta": { "la_gemm": -0.02, "md_random_forest": 0.31 }     // >0 ⇒ E-cores help; intra-run, no reference
+    "e_core_delta": { "la_gemm": -0.02, "md_rf": 0.31 }     // >0 ⇒ E-cores help; intra-run, no reference
   }
 }
 ```
@@ -553,10 +597,10 @@ whose heavy work is the sparse matmul, not dense BLAS — are backend-neutral.
   any best-effort (`biased`) runs, the measured off-core residency so leaky isolation is
   visible rather than silent.
 - The console output uses `rich` (alignment, colour, optional bars). The canonical
-  copy-pasteable artifact is the plain-text report defined in §7.3; `--report md|html` are
+  copy-pasteable artifact is the plain-text report defined in §7.3; `--format md|html` are
   optional extras.
 
-### 7.3 Plain-text report (`--report txt`, default)
+### 7.3 Plain-text report (`--format txt`, default)
 A deterministic, ASCII-only report designed to be pasted into a forum, issue, or gist for
 side-by-side comparison. It is written next to the JSON and echoed to the console on every run.
 
@@ -626,11 +670,16 @@ side-by-side comparison. It is written next to the JSON and echoed to the consol
   all-cores column, plus a `scaling` line (all-cores ÷ single-core), so per-core quality and
   whole-machine throughput sit side by side without blending.
 - **Heterogeneous chips** append an `E-CORE CONTRIBUTION` block: per-task `e_core_delta`
-  (`>0 ⇒ E-cores help`) and the p-core overall, so the single-P / E / all-cores triplet is
-  visible.
+  (`>0 ⇒ E-cores help`) and the p-core overall — i.e. the E / all-cores pair. The full
+  single-P / E / all-cores triplet is shown only when `--sweep` was also passed (which
+  supplies the single-P-core leg); without it the block notes that single-P is absent.
 - **No reference baseline yet:** the `score` column is dropped, `median(s)` becomes the only
   per-task number, and the SCORE SUMMARY shows `OVERALL  (no baseline — raw times only)` with
   the category lines omitted, rather than printing a faked score.
+- **Non-standard `--threads N`** (neither 1 nor physical-all): same raw-times treatment — the
+  SCORE SUMMARY header reads `OVERALL  (threads=N, non-standard — raw times only)` and the
+  category/score lines are omitted, since no reference denominator exists for an arbitrary
+  thread count. The thread count is shown in the identity header as usual.
 - **`--summary`** prints only the identity header and SCORE SUMMARY block (the shareable core),
   omitting the per-task table and notes.
 
@@ -650,7 +699,14 @@ dominating:
   geomean, so each category contributes equally regardless of how many tasks it holds (the
   boosting tasks no longer triple-count). The reference machine still scores exactly **100**.
 - Computed independently for all-cores and single-core (and p-cores on heterogeneous chips);
-  **never blended**.
+  **never blended**. Only these canonical thread configs are scored, bucketed by the
+  `(threads_mode, cores)` pair on each result: `threads_mode="all"` + `cores="all"` →
+  `all_cores`; `threads_mode="single"` (i.e. `--threads 1`) → `single_core`;
+  `threads_mode="all"` + `cores="p"` (the heterogeneous auto-expanded pass) → `p_cores`;
+  `--sweep` → both `all_cores` and `single_core`. A **non-standard `--threads N`**
+  (`threads_mode="explicit"`, neither 1 nor physical-all) has no reference denominator, so it
+  is **not scored** — the run emits raw times + intra-run ratios only and the report labels it
+  `threads=N (non-standard — raw times only)`.
 - **Robustness guards.** Results with `status != "ok"` or `swapped: true` are excluded; if
   exclusions leave a category empty, that category drops out of the headline and the report
   says so. The geomean is also guarded against a zero/negative per-task score (clamped /
@@ -676,11 +732,16 @@ reference machine. Key points:
     on one comparable scale and the gap between them is the E-core contribution in score
     units. (The reference is homogeneous and has no separate "p-cores" run.)
   - `e_core_delta` uses **no reference** — it is the intra-machine time ratio defined in §2.4.
-- **Reproducibility of the reference itself.** Use a publicly-rentable cloud SKU (a
-  current general-purpose x86 instance) rather than a private desktop, and record the instance
-  type, core topology, OS image, BLAS backend, and resolved lockfile hash inside the file.
-  Stamp `reference_version` into every results file; `compare` refuses across reference
-  versions just as it does across `benchmark_version`.
+- **Reference machine — dev placeholder, cloud SKU later.** *During development* the reference
+  is the **developer's own machine**: run the suite with `--sweep`, extract the baseline, and
+  commit it so the scoring/report code lights up end-to-end. This baseline is a **placeholder,
+  not for publishing comparisons** (the dev machine scores ~100 against itself by construction).
+  Before release it is **replaced** by a baseline produced on a publicly-rentable cloud SKU (a
+  current general-purpose x86 instance). Either way the file records the machine identity (instance
+  type or host spec), core topology, OS image, BLAS backend, and resolved lockfile hash; every
+  results file is stamped with `reference_version`, and `compare` refuses across reference
+  versions just as it does across `benchmark_version` — so the dev→cloud swap is a clean,
+  detectable `reference_version` bump.
 - **Bootstrapping.** Until the file exists, the report shows raw times and intra-run ratios
   only, and the headline is omitted rather than faked.
 - **How it's produced.** `reference.json` is not hand-written: run the full suite with
@@ -706,15 +767,16 @@ cpubench/
 ├── cpubench/
 │   ├── __init__.py
 │   ├── cli.py              # argument parsing, orchestration
-│   ├── controller.py       # spawns workers, watchdog, collects result files
+│   ├── controller.py       # spawns workers, collects result files, --resume
 │   ├── worker.py           # runs ONE (task,size,threads,cores) config in isolation
 │   ├── runner.py           # warm-up + fixed repetition + timing + RSS
 │   ├── registry.py         # @task decorator, deterministic ordering, mode resolution
 │   ├── environment.py      # CPU/RAM/OS/Python/BLAS/P-E detection
 │   ├── threading_ctl.py    # env-var + threadpoolctl + per-lib thread wiring
-│   ├── affinity.py         # P/E detection, hard pin (Linux/Win) or QoS bias (macOS),
+│   ├── affinity.py         # P/E detection + modular per-platform enforcement backend
+│   │                       #   (Linux/Win hard pin · macOS QoS via taskpolicy) +
 │   │                       #   single-thread P-core placement, per-core residency sampling
-│   ├── memory.py           # footprint estimate, pre-task guard, swap detection
+│   ├── memory.py           # peak-RSS tracking, swap detection
 │   ├── datasets.py         # seeded synthetic generators (frames, matrices, ML sets)
 │   ├── scoring.py          # ratios, geomeans, e_core_delta, baseline loading + extraction
 │   ├── reporting.py        # txt (canonical) + rich console + md/html
@@ -726,8 +788,7 @@ cpubench/
 │       ├── models.py
 │       └── sparse.py
 ├── baselines/
-│   └── reference.json      # reference machine scores (documented, reproducible SKU)
-├── configs/                # quick.yaml / normal.yaml (generated from registry)
+│   └── reference.json      # reference machine scores (dev placeholder, then cloud SKU)
 ├── results/                # run outputs (gitignored); .partial/ holds per-config result files
 └── tests/                  # correctness smoke + harness unit tests
 ```
@@ -737,14 +798,17 @@ cpubench/
 @task(name="la_gemm", category="linalg",
       sizes={"quick": {"N": 2000}, "normal": {"N": 8000}},
       modes={"quick", "normal"},          # heavier tasks omit "quick"
-      backend_sensitive=True,             # default False; True for linalg/factorization + md_gpr
-      mem_estimate=lambda p: 3 * p["N"]**2 * 8)   # bytes, used by the pre-task guard
+      backend_sensitive=True)             # default False; True for linalg/factorization + md_gpr
 def la_gemm(params, ctx):
     A, B = ctx.data                # generated untimed
     with ctx.timer():              # only this is measured
         C = A @ B
-    return {"trace": float(C.trace())}   # cheap correctness checksum
+    return {"trace": float(C.trace())}   # optional, informational checksum (§3)
 ```
+
+The **registry is the single source of truth** for the task list, sizes, and modes — there are
+no separate `configs/*.yaml` files. `cpubench list` renders the resolved tasks/categories/sizes
+straight from the registry.
 
 The `ctx` handed to a task provides: `ctx.data` (the pre-generated, untimed inputs), a
 `ctx.timer()` context manager wrapping the one timed region, `ctx.params` (resolved sizes),
@@ -792,10 +856,11 @@ guards keep the timings *meaningful*:
 
 - A small `tests/` smoke suite asserts each task *runs and returns the expected output
   shape/dtype* in `quick` mode, so a broken task fails loudly instead of posting a fast time.
-- Each task returns a **cheap, tolerant correctness checksum** (inertia, loss, trace, output
-  hash). It isn't validated against a golden value, but `compare` uses it to catch when two
-  runs did *different work* — the usual cause being a library upgrade that changed
-  convergence, which would otherwise look like a CPU speedup.
+  **This is the primary correctness guard.**
+- A task *may* return a cheap summary value (inertia, loss, trace, output hash) for sanity, but
+  it is **informational only** — not validated against a golden value, not tolerance-calibrated,
+  and not a `compare` gate (§3, §6). The goal is high-level speed measurement, not numerical
+  validation.
 
 To keep the workload itself stable across library versions:
 - Synthetic data generators use **`numpy.random.default_rng(seed)`** directly rather than
@@ -849,18 +914,34 @@ Resolved:
 - **`dr_umap` / dimensionality reduction:** removed entirely. The benchmark now has 6
   categories; quick and normal cover the same set.
 - **Repetitions:** fixed `repeat` (default 5). Adaptive repetition and `time_budget_per_task`
-  removed; a hard per-config watchdog remains only to prevent infinite hangs.
+  removed. The only time limit is a **per-config hang ceiling `--timeout` (default 3600 s = 1 h,
+  `0` disables)** — a safety net against a hung/pathologically-slow worker, not a per-task
+  budget; reps run to completion inside it. Timeout → `status: "failed"`.
 - **Warm-up:** default ON.
 - **Default thread count:** physical cores.
-- **Memory guard:** retained as a safety net (reserve default 2 GB, normal peak target
-  ~8 GB); target machines are assumed to have > 16 GB RAM, so headroom is generous.
-- **`md_lightgbm_multiclass`:** `num_class=10`, 250 rounds, `normal` only.
+- **Memory:** **no pre-task estimate guard and no `mem_estimate`** — `peak_rss_mb` is recorded
+  per config and sizes are tuned down to target machines from those measurements (normal peak
+  target ~8 GB; target machines assumed > 16 GB RAM). A too-big task OOM-fails (`status:
+  "failed"`); swap during a task flags `swapped: true` and excludes it from scoring.
+- **P/E detection:** best-effort; **uncertain or unavailable detection ⇒ treat as homogeneous**
+  (no guessed split), and the heterogeneous-only blocks are omitted.
+- **macOS QoS:** set via the `taskpolicy(8)` CLI at worker-spawn (`-b` for `--cores e`); P-core
+  isolation has no shell lever and is reported as `biased`, verified by 10 Hz off-core residency
+  sampling (`>10%` ⇒ flagged leaky).
+- **Checksums:** **informational only** — no tolerance calibration, not a `compare` gate.
+  Correctness is guarded by the `tests/` shape/dtype smoke suite.
+- **pandas/Polars FE:** same *logical* feature, but **exact cross-engine equivalence is not
+  required or asserted**; the two are scored separately.
+- **Config source of truth:** the **registry**; no `configs/*.yaml` files.
+- **Non-standard `--threads N`** (neither 1 nor physical-all): produces raw times + intra-run
+  ratios only, no scored bucket, labelled as such in the report.
+- **`md_lgbm_multi`:** `num_class=10`, 250 rounds, `normal` only.
 - **Feature engineering:** folded into the `data_prep` category (still **6 categories**), not a
   standalone 7th — avoids one workload family carrying outsized headline weight. Added as
   distinct FE tasks (`fe_lags`, `fe_rolling`, `fe_expanding`, `fe_ewm`, `fe_onehot`,
   `fe_rank`, `fe_datetime`) rather than one end-to-end pipeline. Panel `normal` bounded to 10M
   rows / 20k entities.
-- **RF inference:** added `md_random_forest_predict` to `models` (train untimed, predict timed).
+- **RF inference:** added `md_rf_predict` to `models` (train untimed, predict timed).
 - **Reporting:** category scores are a first-class block shown beneath the headline.
 - **Versioning:** these additions bump `benchmark_version` to **1.1.0**; `compare` will refuse
   across the bump, and `baselines/reference.json` must be regenerated to include the new tasks
@@ -868,11 +949,20 @@ Resolved:
 - **Seeds:** data `default_rng(1337)`; estimator `random_state=1337`.
 
 To confirm at scaffold time:
-- Pick and document the specific **reference cloud SKU** for `baselines/reference.json` (and
-  produce the two baseline sets on it).
+- **Reference baseline:** for now produced on the **developer's own machine** as a placeholder
+  so scoring lights up; pick and document the publicly-rentable **cloud SKU** and regenerate the
+  baseline (a `reference_version` bump) before release.
 - Verify the `uv` lock resolves on all three OSes × {x86_64, arm64} under Python 3.12.
 - Verify `libomp` availability for LightGBM on macOS-arm64 wheels (document the `brew` fallback
   if needed) and confirm Accelerate backend detection.
+
+Open issues (raised, not yet resolved):
+- **macOS P-core isolation is soft.** `taskpolicy -b` confines E-core (`--cores e`) work
+  reliably, but there is no shell/Python lever that *forces* P-cores, so `--cores p` on macOS
+  stays best-effort (`biased`), trusting the residency flag to mark leaky runs. Accepted **as-is
+  for now**; `affinity.py` keeps the enforcement strategy **modular** (a per-platform
+  pin/QoS/verify backend) so a better macOS P-core mechanism can drop in later without touching
+  the runner or scoring. Deferred, not blocking.
 
 ---
 
@@ -884,27 +974,30 @@ Suggested build order (each layer is testable before the next):
    (CPU/RAM/OS/Python/BLAS + P/E detection) and `cpubench env`.
 2. **`threading_ctl.py`** and **`affinity.py`** (pre-import env vars, threadpoolctl, single-thread
    P-core placement, hard pin vs QoS bias, residency sampling).
-3. **`registry.py`** (`@task`, deterministic ordering, modes, `engines`, `backend_sensitive`,
-   `mem_estimate`) + **`datasets.py`** (seeded generators, **pinned dtypes**, the shared
-   frame/panel built once and handed to both engines).
+3. **`registry.py`** (`@task`, deterministic ordering, modes, `engines`, `backend_sensitive`)
+   + **`datasets.py`** (seeded generators, **pinned dtypes**, the shared frame/panel built once
+   and handed to both engines).
 4. **`worker.py`** + **`runner.py`** (subprocess, warm-up, fixed reps, no-reset/read-only
-   discipline, file-based result protocol) and **`memory.py`** (pre-task guard, swap detection),
-   then **`controller.py`** (spawn, watchdog, collect, `--resume`).
+   discipline, file-based result protocol, `peak_rss_mb` + swap sampling) and **`memory.py`**
+   (peak-RSS tracking, swap detection), then **`controller.py`** (spawn, `--timeout` kill,
+   collect, `--resume`).
 5. **`tasks/`** — implement the catalogue (§5) one category at a time, each with a `quick`-mode
-   smoke test asserting shape/dtype and (for dual-engine tasks) pandas≈Polars equivalence.
+   smoke test asserting shape/dtype (dual-engine tasks run on both engines but are **not**
+   asserted equal across engines).
 6. **`scoring.py`** (ratios, category geomeans in the fixed order, `e_core_delta`, baseline
    load + extraction) and **`reporting.py`** (the §7.3 txt report first, then `rich`/md/html).
 
 **Deliberately deferred — do not block on these, and do not fake them:**
-- `baselines/reference.json` does not exist yet. Build the scoring code, but until a baseline is
-  produced on the chosen SKU the report must show raw times + intra-run ratios and **omit the
-  headline** (§8). Scores light up once the baseline is committed.
-- Several sizes and `mem_estimate` formulas (FE panel, `md_gpr`, `md_random_forest_predict`,
-  `sp_feature_hasher`) are first guesses; measure real RSS/time on first runs and tune, per the
-  benchmark's "measure then tune" stance. The `mem_estimate` for iterative/materialization-heavy
-  tasks should be calibrated from observed `peak_rss_mb`, not derived analytically.
+- `baselines/reference.json` does not exist yet. Build the scoring code; until a baseline exists
+  the report shows raw times + intra-run ratios and **omits the headline** (§8). A **dev-machine
+  placeholder** baseline is produced first to exercise scoring end-to-end; it is replaced by the
+  cloud-SKU baseline (a `reference_version` bump) before release.
+- Several sizes (FE panel, `md_gpr`, `md_rf_predict`, `sp_fhash`) are first guesses. Measure real
+  `peak_rss_mb` / time on first runs and tune sizes down to the target machines ("measure then
+  tune"). There is no `mem_estimate` to maintain — observed RSS is the tuning signal.
 
 **Definition of done for the handoff:** `uv run cpubench run --mode quick` completes on
 Linux/macOS/Windows, streams resumable per-config JSON, emits a valid schema-v1 results file and
-the §7.3 txt report (raw-times mode, no headline), and the `tests/` smoke + equivalence suite
-passes. The reference run and headline scores follow once the SKU is chosen.
+the §7.3 txt report (raw-times mode, no headline), and the `tests/` smoke suite (shape/dtype)
+passes. The headline lights up once the dev-machine placeholder baseline is committed, and is
+re-based on the cloud SKU before release.

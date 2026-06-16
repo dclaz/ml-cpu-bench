@@ -20,7 +20,7 @@ uv run cpubench list                 # tasks + categories + sizes
 uv run cpubench env                  # detected CPU/RAM/BLAS/P-E only
 uv run cpubench report FILE          # re-render a report from results JSON
 uv run cpubench compare A B          # diff two runs (noise/version aware)
-uv run pytest                        # smoke + equivalence tests
+uv run pytest                        # shape/dtype smoke tests
 uv run ruff check . && uv run ruff format .
 ```
 
@@ -36,7 +36,7 @@ Stack: `numpy scipy scikit-learn pandas polars lightgbm threadpoolctl psutil ric
 then `controller` collects → `scoring` → `reporting`.
 
 - `environment.py` CPU/RAM/OS/BLAS/P-E detection · `threading_ctl.py` per-lib thread wiring ·
-  `affinity.py` P/E detect, pin/QoS, residency · `memory.py` guard + swap · `datasets.py`
+  `affinity.py` P/E detect, modular per-platform pin/QoS, residency · `memory.py` peak-RSS + swap · `datasets.py`
   seeded generators · `registry.py` `@task` · `worker.py`/`runner.py` isolation+timing ·
   `scoring.py` · `reporting.py` · `tasks/{data_prep,linalg,factorization,clustering,models,sparse}.py`.
 
@@ -48,7 +48,8 @@ then `controller` collects → `scoring` → `reporting`.
 - Only the algorithm under test is inside `ctx.timer()`. Data generation, imports, allocation,
   frame construction, and the pre-FE sort are all **untimed**.
 - Warm-up is **ON** by default (1 discarded run). Reps are a **fixed `repeat`** (default 5) —
-  no adaptive logic, no per-task time budget. The watchdog exists only to kill an infinite hang.
+  no adaptive logic, no per-task time budget. Only time limit is a per-config **`--timeout`
+  (default 3600 s = 1 h, `0` disables)** hang ceiling; timeout → `status: "failed"`.
 - **No reset between reps. The timed region is READ-ONLY.** Use non-mutating ops (`np.sort`
   not `arr.sort`; `df.sort_values` not in-place), no `overwrite_a/overwrite_b`, `copy_X=True`,
   `warm_start=False`. Restore *input only*, untimed, for inherently destructive ops.
@@ -61,15 +62,22 @@ then `controller` collects → `scoring` → `reporting`.
   pandas-vs-Polars comparison is unfair.
 - Default thread count = **physical cores** (`psutil.cpu_count(logical=False)`), not logical.
 - Single-thread runs pin to **one P-core** (Linux/Win affinity; macOS high QoS).
-- macOS has **no hard core-type affinity** — QoS bias only. Report `enforcement`
-  (`none`/`pinned`/`biased`) + measured `offcore_residency_pct`; never report what was requested.
+- macOS has **no hard core-type affinity** — QoS bias only (set via `taskpolicy(8)` at
+  worker-spawn; `-b` for `--cores e`). Report `enforcement` (`none`/`pinned`/`biased`) +
+  measured `offcore_residency_pct` (10 Hz sampling; `biased` + `>10%` ⇒ flagged leaky); never
+  report what was requested.
+- **P/E detection is best-effort: uncertain/unavailable ⇒ treat as homogeneous** (no guessed
+  split), heterogeneous-only blocks omitted.
 
 **Isolation & I/O (§3)**
 - Each `(task,size,threads,cores)` runs in its own **subprocess**; no state leaks.
 - The worker writes its result to a **file** (`results/.partial/<id>.json`), NOT stdout —
   library chatter on stdout would corrupt a parsed line. stdout/stderr are logs only.
-- Output is resumable JSONL; `--resume` skips completed configs. OOM/timeout/non-zero exit →
-  `status: "failed"`, never a hang.
+- Resume is driven by the **per-config partial files** (`results/.partial/<id>.json`) — they
+  ARE the incremental stream and the sole resume source of truth (no separate JSONL log);
+  `--resume` skips configs whose partial file exists, and the final schema-v1 JSON is assembled
+  from them at end-of-run. OOM / timeout / non-zero exit → `status: "failed"` (no partial file,
+  so it's re-attempted). (No `skipped_memory` status — that guard is gone.)
 
 **Determinism / data (§5, §11)**
 - All data synthetic via `numpy.random.default_rng(1337)` (NOT sklearn `make_*`). Estimators
@@ -77,9 +85,14 @@ then `controller` collects → `scoring` → `reporting`.
 - **PIN DTYPES explicitly** (`int64`, `float64`; one-hot output `uint8`). Never the
   platform-default int (`int32` on Windows, `int64` elsewhere) — that breaks cross-OS identity.
 - The source frame/panel is generated **once**; pandas and Polars build from the same arrays.
+  Both engines run, but their outputs are **not** asserted equal (speed, not agreement).
 
-**Memory (§3)** — pre-task guard skips (`status: "skipped_memory"`) if estimate > available −
-2 GB reserve; swap during a task → `swapped: true`, excluded from scoring.
+**Memory (§3)** — **no pre-task estimate guard and no `mem_estimate`.** Record `peak_rss_mb` per
+config and tune sizes down to target machines from it; a too-big task OOM-fails. Swap during a
+task → `swapped: true`, excluded from scoring.
+
+**Checksums (§3, §11)** — **informational only**: no tolerance calibration, not a `compare`
+gate. Correctness is guarded by the shape/dtype smoke suite.
 
 ---
 
@@ -104,20 +117,22 @@ then `controller` collects → `scoring` → `reporting`.
 - Authoritative JSON: `schema_version: 1`, `benchmark_version: "1.1.0"`.
 - Default report is the **plain-text §7.3 format**: ASCII, ≤72 cols, deterministic ordering,
   scores as integers, leads with OVERALL then the 6-category block. Built for copy-paste diffing.
-- `compare` refuses on mismatched `benchmark_version`, `reference_version`, `mode`, or per-task
-  `checksum` (different work ≠ CPU difference).
+- `compare` refuses on mismatched `benchmark_version`, `reference_version`, or `mode`. A checksum
+  difference is noted informationally, **not** a refusal. Non-standard `--threads N` (neither 1
+  nor physical-all) → raw times only, no scored bucket, labelled as such.
 
 ---
 
 ## DEFERRED — do not fake these
 
-- **`baselines/reference.json` does not exist yet.** Build the scoring code, but until a baseline
-  is produced on the chosen reference SKU, the report shows **raw times + intra-run ratios and
-  OMITS the headline**. Do NOT invent a baseline or hardcode reference numbers.
-- Sizes and `mem_estimate` for the FE panel, `md_gpr`, `md_random_forest_predict`, and
-  `sp_feature_hasher` are first guesses. Do NOT "tune" them without real measurements;
-  `mem_estimate` for iterative/materialization-heavy tasks should be calibrated from observed
-  `peak_rss_mb`, not derived analytically.
+- **`baselines/reference.json` does not exist yet.** Until it does, the report shows **raw times
+  + intra-run ratios and OMITS the headline**. Do NOT invent a baseline or hardcode reference
+  numbers. *For now* the reference is a **dev-machine placeholder** (produced on our own machine
+  to exercise scoring); a publicly-rentable **cloud SKU** baseline replaces it (a
+  `reference_version` bump) before release.
+- Sizes for the FE panel, `md_gpr`, `md_rf_predict`, and `sp_fhash` are first guesses. Do NOT
+  "tune" them without real measurements — tune sizes down from observed `peak_rss_mb`/time on
+  first runs ("measure then tune"). There is no `mem_estimate` to maintain.
 
 ---
 
@@ -126,10 +141,10 @@ then `controller` collects → `scoring` → `reporting`.
 1. `pyproject.toml` + `uv.lock`, `environment.py`, `cpubench env`.
 2. `threading_ctl.py` + `affinity.py`.
 3. `registry.py` + `datasets.py` (pinned dtypes; shared frame/panel feeds both engines).
-4. `worker.py` + `runner.py` (isolation, read-only reps, file result protocol) + `memory.py`,
-   then `controller.py` (spawn, watchdog, collect, `--resume`).
+4. `worker.py` + `runner.py` (isolation, read-only reps, file result protocol, peak-RSS/swap)
+   + `memory.py`, then `controller.py` (spawn, `--timeout` kill, collect, `--resume`).
 5. `tasks/` — one category at a time, each with a quick-mode smoke test asserting shape/dtype
-   and (dual-engine tasks) a pandas≈Polars equivalence check.
+   (dual-engine tasks run on both engines; no cross-engine equivalence assertion).
 6. `scoring.py` (fixed category order, e_core_delta, baseline load+extract) + `reporting.py`
    (txt first, then rich/md/html).
 
@@ -141,16 +156,17 @@ Each layer is testable before the next. Commit in small, reviewable steps.
 
 `uv run cpubench run --mode quick` completes on the host OS, streams resumable per-config JSON,
 emits a valid schema-v1 results file and the §7.3 txt report (raw-times mode, no headline), and
-the smoke + equivalence test suite passes. Reference run and live scores follow once the SKU is
-chosen.
+the shape/dtype smoke suite passes. The headline lights up once the dev-machine placeholder
+baseline is committed, then is re-based on the cloud SKU before release.
 
 ---
 
 ## Conventions
 
 - Tasks register via `@task(name, category, sizes={quick,normal}, modes, backend_sensitive,
-  mem_estimate, engines=...)` and return a cheap correctness **checksum** (tolerant invariant;
-  exact only for deterministic ops like the hashers). See the pattern in §9.
+  engines=...)` and may return a cheap **checksum** (informational only — not validated, not a
+  `compare` gate). The **registry is the single source of truth** for tasks/sizes/modes (no
+  `configs/*.yaml`). See the pattern in §9.
 - `ctx` provides `ctx.data`, `ctx.timer()`, `ctx.params`, `ctx.threads`, `ctx.rng`.
 - Long-runners omit `"quick"` from `modes`.
 - Prefer editing existing modules over adding new ones; keep `tasks/` modules independent.
