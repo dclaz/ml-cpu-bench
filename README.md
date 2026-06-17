@@ -1,28 +1,171 @@
 # ml-cpu-bench
 
-A reproducible benchmark measuring **CPU** performance on classical ML and
-data-science workloads (no neural nets, no GPU). Clone, run one command, get
-per-task and category scores.
+A reproducible benchmark that measures **CPU** performance on classical machine-learning and
+data-science workloads — no neural nets, no GPU. Clone, run one command, and get per-task and
+per-category numbers for how good a given CPU/system is at real ML + data-prep work.
 
-See [`SPEC.md`](SPEC.md) for the authoritative design and [`CLAUDE.md`](CLAUDE.md)
-for the quick reference and invariants.
+It exercises the parts of the stack that classical ML actually stresses: dense BLAS/LAPACK,
+scikit-learn estimators, LightGBM, sparse/text pipelines, and pandas-vs-Polars data wrangling —
+all on synthetic, fixed-seed data so results are stable across machines and runs.
+
+See [`SPEC.md`](SPEC.md) for the authoritative design and [`CLAUDE.md`](CLAUDE.md) for the quick
+reference and the invariants that keep the numbers honest.
+
+---
+
+## Requirements
+
+The **only** prerequisite is [`uv`](https://docs.astral.sh/uv/). You do **not** need conda, a
+manual virtualenv, or a pre-installed Python.
+
+```bash
+# install uv (pick one)
+curl -LsSf https://astral.sh/uv/install.sh | sh     # Linux / macOS
+brew install uv                                      # macOS (Homebrew)
+```
+
+- **Python 3.12** is required, but `uv` downloads and manages it for you if the machine doesn't
+  have one — `pyproject.toml` pins `requires-python = "==3.12.*"`.
+- Dependencies are pinned via a **universal `uv.lock`** (Linux / macOS / Windows × x86_64 /
+  arm64), so `uv sync` reproduces the exact same versions everywhere.
+- **macOS only:** LightGBM needs an OpenMP runtime. Modern wheels usually bundle it; if
+  `import lightgbm` fails, run `brew install libomp`.
+
+---
 
 ## Quick start
 
 ```bash
-uv sync                              # install pinned deps (Python 3.12)
+git clone <repo> && cd ml-cpu-bench
+uv sync                              # creates .venv/ and installs the locked deps
 uv run cpubench run --mode quick     # fast subset — the dev/CI loop
-uv run cpubench run                  # full normal-mode run
-uv run cpubench run --sweep          # add single-core pass (per-core scores)
-uv run cpubench list                 # tasks + categories + sizes
-uv run cpubench env                  # detected CPU/RAM/BLAS/P-E only
-uv run cpubench report FILE          # re-render a report from results JSON
-uv run cpubench compare A B          # diff two runs (noise/version aware)
 ```
 
-## Notes
+That's it — `uv sync` builds a project-local `.venv/`, and `uv run` activates it per command, so
+there's no separate "activate the environment" step. Both `.venv/` and `results/` are gitignored
+and regenerate on a fresh clone.
 
-- Python **3.12** only. Dependencies are pinned via a universal `uv.lock`.
-- **LightGBM** needs an OpenMP runtime. Modern wheels generally bundle it; on
-  macOS the fallback is `brew install libomp`.
-- All data is synthetic and fixed-seed; no disk I/O is timed.
+### Commands
+
+```bash
+uv run cpubench run --mode quick     # fast subset (excludes the long-runners)
+uv run cpubench run                  # full normal-mode run (every task)
+uv run cpubench run --sweep          # add a single-core pass (per-core diagnostic)
+uv run cpubench list                 # list tasks + categories + sizes (from the registry)
+uv run cpubench env                  # print detected CPU / RAM / cores / BLAS / P-E only
+uv run cpubench report FILE          # re-render a report from a results JSON
+uv run cpubench compare A B          # diff two runs (noise- and version-aware)
+```
+
+Useful `run` flags: `--threads N` / `--cores all|p|e`, `--tasks t1,t2` / `--exclude t1`,
+`--repeat N` (default 5), `--seed S` (default 1337), `--timeout SECONDS` (per-config hang
+ceiling, default 3600, `0` disables), `--cooldown SECONDS` (default 2), `--no-warmup`,
+`--resume`, `--out PATH`, `--format txt|md|html`, `--summary`, `--no-report`.
+
+---
+
+## What it measures (6 categories)
+
+| Category | Examples | What it stresses |
+|---|---|---|
+| **data_prep** | `dp_groupby/join/sort/filter/string/rolling`, `fe_lags/rolling/expanding/ewm/onehot/rank/datetime` | DataFrame engines — run on **both pandas and Polars**, scored separately |
+| **linalg** | `la_gemm/solve/cholesky/qr/svd/eigh/fft` | dense BLAS/LAPACK (backend-sensitive) |
+| **factorization** | `mf_tsvd/pca/nmf` | matrix decomposition (backend-sensitive) |
+| **clustering** | `cl_kmeans/mbkmeans/optics/gmm` | distance/density/EM workloads |
+| **models** | `md_linreg/ridge/lasso/logreg/bayes_ridge/gpr/rf/rf_predict/hist_gbm/lgbm/lgbm_multi/svc_rbf/knn` | scikit-learn + LightGBM fit/predict |
+| **sparse** | `sp_tfidf/hashvec/fhash/matmul/tsvd/nmf/saga`, `nlp_lda`, `sp_lasso_cv` | sparse + NLP/text pipelines (backend-neutral) |
+
+Two run **modes**: `quick` (a fast subset for CI/dev, excludes the long-runners `md_gpr`,
+`md_lgbm_multi`, `nlp_lda`, `sp_lasso_cv`) and `normal` (every task, the real benchmark).
+
+---
+
+## How it works
+
+```
+cli → controller → (per config) worker subprocess → runner (timed reps) → result file
+                 → collect partial files → scoring → reporting
+```
+
+Each `(task, size, threads, cores)` config runs in its **own subprocess**, which is what makes
+the numbers trustworthy:
+
+- **Honest timing.** Only the algorithm under test is inside the timed region — data generation,
+  imports, allocation, and frame construction are untimed. One discarded warm-up run, then a
+  fixed `repeat` (default 5) timed reps; the timed region is read-only (no reset between reps).
+- **Fair threading.** A single `--threads` value is honoured by *all* parallel libraries (BLAS,
+  scikit-learn, LightGBM, Polars, numexpr) via env vars set **before any heavy import**. Default
+  is **physical** cores.
+- **Reproducible data.** Everything is synthetic via `numpy.random.default_rng(1337)` with
+  explicitly pinned dtypes (`int64`/`float64`/`uint8`), so the generated bytes are identical
+  across OS/arch. Estimators are seeded with `random_state=1337`.
+- **Resumable.** Per-config partial files (`results/.partial/<id>.json`) are the incremental
+  stream and the `--resume` source of truth; the final schema-v1 JSON is assembled from them.
+- **Memory- and swap-aware.** Each config records `peak_rss_mb`; a too-big task OOM-fails
+  (`status: "failed"`, excluded) rather than hanging the suite, and any task that swaps is
+  flagged and excluded from scoring.
+
+Source modules live in [`cpubench/`](cpubench/): `environment.py`, `threading_ctl.py`,
+`affinity.py`, `registry.py`, `datasets.py`, `worker.py`, `runner.py`, `memory.py`,
+`controller.py`, `scoring.py`, `reporting.py`, and the per-category task modules in
+[`cpubench/tasks/`](cpubench/tasks/). The **registry is the single source of truth** for the
+task list, sizes, and modes (no config files).
+
+---
+
+## Output
+
+Every run writes two files (default into `results/<run_id>.{json,txt}`):
+
+- An **authoritative JSON** (`schema_version: 1`) with full per-config detail: all raw reps,
+  median/min/std/cv, `peak_rss_mb`, `cpu_wall_ratio`, checksum, status, and the detected
+  environment.
+- A **plain-text report** (§7.3): pure ASCII, ≤72 columns, deterministic ordering — built to
+  paste into an issue/gist and `diff` cleanly. `--format md|html` emits those too.
+
+### Scores are deferred (raw-times mode)
+
+Scores are ratios against a reference machine (`reference_machine = 100`), but
+**`baselines/reference.json` is intentionally not committed yet**. Until it is, every run shows
+**raw times and intra-run ratios only**, and the headline is omitted
+(`OVERALL (no baseline -- raw times only)`). This is by design, not a setup gap — so the numbers
+in a freshly cloned run are this machine's raw medians, not cross-machine scores. The scoring and
+report code is fully written and unit-tested against an in-repo fixture baseline; the headline
+lights up once a baseline is added.
+
+### Per-task score (once a baseline exists)
+
+`score = reference_median_s / measured_median_s` (`>1` = faster than reference). Category score =
+geomean of its per-task scores; **headline = `100 × geomean of the 6 category scores`**
+(category-weighted). pandas and Polars are separate scored entries. The **all-cores** score is
+the headline (whole-machine throughput); **single-core** (under `--sweep`) is the secondary
+per-core diagnostic. The two are never blended.
+
+---
+
+## Development
+
+```bash
+uv run pytest                        # shape/dtype smoke suite + harness/scoring/report units
+uv run ruff check . && uv run ruff format .
+```
+
+The `tests/` smoke suite is the **primary correctness guard**: it asserts every task runs in
+quick mode and returns the expected output shape/dtype (dual-engine tasks run on both engines but
+are not asserted equal across engines). Build/test one category at a time; commit in small steps.
+
+---
+
+## Notes & caveats
+
+- **Physical, not logical, cores by default** — for compute-bound work that's peak honest
+  throughput; SMT siblings add contention, not FP units. Probe SMT explicitly with `--threads N`.
+- **BLAS backend matters.** Accelerate vs OpenBLAS vs MKL can swing linalg results 2–3×; the
+  backend is always detected and reported, and cross-backend comparisons are labelled.
+- **Apple Silicon P/E.** True P-core isolation isn't enforceable on macOS (QoS bias only, with
+  measured off-core residency); evaluate from the single-P / E-core / all-cores triplet. On
+  homogeneous chips the P/E sections are omitted entirely.
+- **Thermal throttling is retained** as real-world behaviour, not corrected for.
+- **Checksums are informational only** — not validated, not a `compare` gate.
+- On an 8 GB machine, several `normal`-mode tasks will OOM-fail by design (sizes target
+  ≤ ~8 GB RSS assuming > 16 GB RAM); **quick mode is the dev loop.**

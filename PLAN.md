@@ -262,3 +262,51 @@ unit tests only.
 cloud SKU before release — a `reference_version` bump); size tuning for FE panel / `md_gpr` /
 `md_rf_predict` / `sp_fhash` (measure-then-tune from observed RSS); macOS Accelerate detection
 confirmation on a real Apple box.
+
+---
+
+## Execution via `/goal` (autonomous build)
+
+`/goal` is a built-in Claude Code command (v2.1.139+): a session-scoped autonomous loop that
+keeps working turn-by-turn until a **transcript-verifiable** completion condition is met (a
+Haiku evaluator checks after each turn, feeds back why it's not done, and re-runs). This plan's
+Definition of Done is a perfect fit — three commands with visible exit codes.
+
+**Chosen approach:** a *single end-to-end DoD goal* (not staged per-layer), run in
+**auto-accept mode** for permissions (no settings allowlist needed).
+
+### Beforehand
+1. **Confirm Claude Code ≥ v2.1.139.** `/goal` is unavailable if `disableAllHooks` /
+   `allowManagedHooksOnly` is set — its evaluator is a prompt-based Stop hook.
+2. **Enable auto-accept mode** so `uv`/`git`/`pytest`/`ruff` calls don't prompt mid-loop.
+3. **De-risk Layer 1:** run `uv lock && uv sync` once first so a dependency-resolution hiccup
+   doesn't burn autonomous turns (§10 says the lock resolves cleanly post-numba/UMAP removal).
+4. **Anchor is `PLAN.md` + `SPEC.md`** — the loop reads both; PLAN.md drives layer order,
+   SPEC.md is authoritative for task details.
+
+### The goal condition (paste verbatim)
+```
+/goal Implement ml-cpu-bench per PLAN.md (repo root), building in its Layer 1-6 order and
+honouring the timing/threading/determinism invariants. DONE only when all three are shown in
+this transcript with their output/exit codes: (1) `uv run cpubench run --mode quick` completes
+covering all 6 categories (data_prep, linalg, factorization, clustering, models, sparse) and
+writes a schema-v1 results JSON plus the SPEC §7.3 plain-text report in raw-times mode; (2)
+`uv run pytest` passes (shape/dtype smoke + harness/scoring/report unit tests); (3)
+`uv run ruff check .` reports no errors. Constraints: do NOT create or fake
+baselines/reference.json; normal-mode OOM on this 8GB box is expected, not a failure. If the
+same error blocks progress for 3 consecutive turns, stop and report it. Stop after 50 turns
+regardless.
+```
+
+### Why this works / watch-outs
+- The evaluator only reads the **transcript**, so the loop must actually *run* the three
+  verification commands and show their output — the goal text forces that. Early turns read
+  "not done, keep building" (cpubench doesn't exist yet), which is intended.
+- The **turn cap (50)** and **3-strike same-error** clauses bound a runaway loop on a big build.
+- The **"don't fake the baseline"** clause preserves the deferred-baseline invariant.
+- Monitor with bare `/goal` (status: elapsed, turns, tokens, last reason); `/goal clear` to stop.
+
+### Fallback if the single goal proves too long to steer
+Staged per-layer goals (one `/goal` per layer, e.g. *"Layer 1 done when `uv run cpubench env`
+prints CPU/RAM/cores/BLAS and its unit test passes"*), then a final DoD goal as the end-to-end
+gate. A clean checkpoint-driven recovery, not the default path.
