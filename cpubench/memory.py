@@ -16,6 +16,11 @@ import psutil
 class MemorySampler:
     """High-water RSS sampler + swap-in/out delta around the timed region."""
 
+    # Only trust the (system-wide) swap counters when this task was actually memory-bound,
+    # i.e. its peak RSS reached this fraction of total RAM. macOS pages/compresses memory
+    # almost constantly, so an unconditional sin/sout delta over-flags tiny tasks.
+    SWAP_RSS_FRACTION = 0.9
+
     def __init__(self, interval: float = 0.05):
         self.interval = interval
         self._proc = psutil.Process()
@@ -23,6 +28,10 @@ class MemorySampler:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._swap0 = None
+        try:
+            self._ram_total = psutil.virtual_memory().total
+        except Exception:
+            self._ram_total = None
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -48,7 +57,11 @@ class MemorySampler:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         swapped = False
-        if self._swap0 is not None:
+        memory_bound = (
+            self._ram_total is not None
+            and self.peak_bytes >= self.SWAP_RSS_FRACTION * self._ram_total
+        )
+        if self._swap0 is not None and memory_bound:
             try:
                 swap1 = psutil.swap_memory()
                 swapped = (swap1.sin - self._swap0.sin) > 0 or (swap1.sout - self._swap0.sout) > 0

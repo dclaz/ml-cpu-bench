@@ -33,6 +33,34 @@ def _rss(x: float | None) -> str:
     return f"{x:.0f}"
 
 
+def _leg_tag(r: dict) -> str:
+    """Human-readable leg name for a result (mirrors controller._leg_name)."""
+    tm, cores = r.get("threads_mode"), r.get("cores")
+    if tm == "single":
+        return "1-core"
+    if tm == "explicit":
+        return f"{r.get('threads')}t"
+    if cores == "p":
+        return "P-cores"
+    if cores == "e":
+        return "E-cores"
+    return "all-cores"
+
+
+def _in_bucket(r: dict, bucket: str | None) -> bool:
+    """Whether a result belongs to the named scoring bucket (mirrors scoring.bucket_of)."""
+    tm, cores = r.get("threads_mode"), r.get("cores")
+    if bucket == "all_cores":
+        return tm == "all" and cores == "all"
+    if bucket == "single_core":
+        return tm == "single"
+    if bucket == "p_cores":
+        return tm == "all" and cores == "p"
+    if bucket == "e_cores":
+        return tm == "all" and cores == "e"
+    return True
+
+
 def _ordered_entries() -> list[tuple[str, str]]:
     """(category, scored_name) in registry order — the canonical display order."""
     registry.load_all_tasks()
@@ -149,7 +177,10 @@ def _per_task(document: dict, scores: dict, bucket: str | None) -> list[str]:
     raw_mode = not scores.get("reference_present")
     entry = scores.get(bucket, {}) if bucket else {}
     per_task = entry.get("per_task", {}) if not raw_mode else {}
-    results = {r["task"]: r for r in document.get("results", [])}
+    # Show the primary (headline) leg's timings — not whichever leg happened to sort last.
+    all_results = document.get("results", [])
+    primary = [r for r in all_results if _in_bucket(r, bucket)] if bucket else []
+    results = {r["task"]: r for r in (primary or all_results)}
 
     scored = bool(per_task) and not raw_mode
 
@@ -207,15 +238,32 @@ def _wrap_list(label: str, items: list[str], placeholder: str) -> list[str]:
 
 def _notes(document: dict, scores: dict, bucket: str | None) -> list[str]:
     results = document.get("results", [])
-    noisy = [r["task"] for r in results if r.get("status") == "ok" and r.get("noisy")]
-    excluded = [r["task"] for r in results if r.get("status") != "ok" or r.get("swapped")]
+    # On heterogeneous chips a task has >1 leg; annotate each note entry with its leg and
+    # dedup so a per-leg result doesn't appear twice.
+    multi = len({(r.get("threads_mode"), r.get("cores")) for r in results}) > 1
+
+    def _lab(r: dict) -> str:
+        return f"{r['task']} ({_leg_tag(r)})" if multi else r["task"]
+
+    def _dedup(seq) -> list[str]:
+        return list(dict.fromkeys(seq))
+
+    noisy = _dedup(
+        _lab(r) for r in results if r.get("status") == "ok" and not r.get("swapped")
+        and r.get("noisy")
+    )
+    failed = _dedup(_lab(r) for r in results if r.get("status") != "ok")
+    swapped = _dedup(
+        _lab(r) for r in results if r.get("status") == "ok" and r.get("swapped")
+    )
     lines = [MINOR, " NOTES"]
-    lines += _wrap_list("noisy (cv>0.10):   ", noisy, "(none)")
-    lines += _wrap_list("excluded:          ", excluded, "(none skipped / failed / swapped)")
+    lines += _wrap_list("noisy (cv>0.10):    ", noisy, "(none)")
+    lines += _wrap_list("failed:             ", failed, "(none)")
+    lines += _wrap_list("swapped (excluded): ", swapped, "(none)")
     entry = scores.get(bucket, {}) if bucket else {}
     empty = entry.get("empty_categories")
     if empty:
-        lines += _wrap_list("empty categories:  ", empty, "(none)")
+        lines += _wrap_list("empty categories:   ", empty, "(none)")
     # p/e isolation note
     biased = [r for r in results if r.get("enforcement") == "biased"]
     if biased:
