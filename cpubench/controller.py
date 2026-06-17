@@ -140,12 +140,58 @@ def _failed_entry(config: registry.RunConfig, reason: str) -> dict:
     }
 
 
+def _leg_name(threads_mode: str, cores: str) -> str:
+    """Human-readable name for a (threads_mode, cores) leg."""
+    if threads_mode == "single":
+        return "1-core"
+    if threads_mode == "explicit":
+        return "explicit-threads"
+    if cores == "p":
+        return "P-cores"
+    if cores == "e":
+        return "E-cores"
+    return "all-cores"
+
+
+def _display_label(config: registry.RunConfig, show_leg: bool) -> str:
+    """Short per-config label: scored name, tagged with the leg name when >1 leg runs."""
+    name = config.scored_name
+    if show_leg:
+        return f"{name}  [{_leg_name(config.threads_mode, config.cores)}]"
+    return name
+
+
+def _result_summary(result: dict) -> str:
+    """One-line timing summary printed as each config finishes."""
+    median = result.get("median_s")
+    if median is None:
+        return result.get("status", "?")
+    cv = result.get("cv") or 0.0
+    rss = result.get("peak_rss_mb")
+    rss_str = f"{rss:.0f}MB" if rss is not None else "?"
+    flags = ""
+    if result.get("swapped"):
+        flags += " SWAPPED"
+    if result.get("noisy"):
+        flags += " noisy"
+    return f"median {median:>8.3g}s  cv {cv:.2f}  rss {rss_str:>8}{flags}"
+
+
 def run_benchmark(args: argparse.Namespace) -> int:
     os.makedirs(PARTIAL_DIR, exist_ok=True)
     registry.load_all_tasks()
 
     topo = affinity.detect_pe_topology()
     env = environment.detect_environment(perf_cores=topo["perf_cores"], eff_cores=topo["eff_cores"])
+
+    cores_desc = f"{env['physical_cores']} physical / {env['logical_cores']} logical"
+    cores_desc += (
+        f"  ({env['perf_cores']}P + {env['eff_cores']}E)"
+        if env["perf_cores"]
+        else "  (homogeneous)"
+    )
+    print(f"CPU    {env['cpu_model']} ({env['arch']})")
+    print(f"Cores  {cores_desc}   BLAS {env['blas_backend']}")
 
     if env["baseline_load_pct"] is not None and env["baseline_load_pct"] > 25.0:
         sys.stderr.write(
@@ -176,26 +222,39 @@ def run_benchmark(args: argparse.Namespace) -> int:
         cooldown=args.cooldown,
     )
 
-    print(f"Running {len(configs)} configs (mode={args.mode}, legs={len(legs)})...")
+    n = len(configs)
+    width = len(str(n))
+    multi_leg = len(legs) > 1
+    leg_names = ", ".join(
+        f"{_leg_name(leg['threads_mode'], leg['cores'])} [{leg['threads']}t]" for leg in legs
+    )
+    label_w = 46 if multi_leg else 34
+    print(f"Running {n} configs (mode={args.mode}, {len(legs)} leg(s): {leg_names})...")
     results: list[dict] = []
     for i, config in enumerate(configs, 1):
         partial_path = os.path.join(PARTIAL_DIR, f"{config.config_id}.json")
-        label = f"[{i}/{len(configs)}] {config.config_id}"
+        # The line starts with the label (no newline) and is completed by the result, so the
+        # terminal scrollback becomes a live per-task timing log.
+        label = _display_label(config, multi_leg)
+        print(f"[{i:>{width}}/{n}] {label:<{label_w}} ", end="", flush=True)
         if args.resume and os.path.exists(partial_path):
-            print(f"{label}  (resume: skip)")
             with open(partial_path) as fh:
-                results.append(json.load(fh))
+                result = json.load(fh)
+            results.append(result)
+            print(f"skip (resume) {_result_summary(result)}")
             continue
         # Stale partial from a prior run of the same id — overwrite.
         if os.path.exists(partial_path):
             os.unlink(partial_path)
-        print(f"{label}  running...", flush=True)
         status, reason = _spawn(config, topo, partial_path)
         if status == "ok":
             with open(partial_path) as fh:
-                results.append(json.load(fh))
+                result = json.load(fh)
+            results.append(result)
+            print(_result_summary(result))
         else:
             results.append(_failed_entry(config, reason or "worker failed"))
+            print(f"FAILED  ({reason or 'worker failed'})")
         if config.cooldown and i < len(configs):
             time.sleep(config.cooldown)
 

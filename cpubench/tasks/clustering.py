@@ -52,17 +52,23 @@ def cl_mbkmeans(params, ctx):
     "clustering",
     data=datasets.blobs,
     sizes={
-        "quick": {"n_samples": 4_000, "n_features": 10, "centers": 10},
-        "normal": {"n_samples": 30_000, "n_features": 10, "centers": 10},
+        "quick": {"n_samples": 3_000, "n_features": 10, "centers": 10, "max_eps": 2.0},
+        "normal": {"n_samples": 30_000, "n_features": 10, "centers": 10, "max_eps": 2.0},
     },
 )
 def cl_optics(params, ctx):
     from sklearn.cluster import OPTICS
 
     x = ctx.data
+    # max_eps bounds the neighbour search (and reachability): a finite, tight eps with the
+    # ball-tree index keeps OPTICS from degenerating toward the full O(n^2) distance work.
+    max_eps = float(ctx.params.get("max_eps", 2.0))
     with ctx.timer():
         model = OPTICS(
-            min_samples=10, max_eps=5.0, algorithm="ball_tree", n_jobs=resolve_n_jobs(ctx.threads)
+            min_samples=10,
+            max_eps=max_eps,
+            algorithm="ball_tree",
+            n_jobs=resolve_n_jobs(ctx.threads),
         )
         model.fit(x)
     n_clusters = int(model.labels_.max()) + 1

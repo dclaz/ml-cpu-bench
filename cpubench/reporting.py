@@ -1,15 +1,16 @@
 """Reports: §7.3 plain-text (canonical) first, then rich/md/html.
 
-The txt report is pure ASCII, ≤72 columns, deterministic ordering (registry order, fixed
-category order, fixed rounding) so two pasted reports ``diff`` cleanly. When no baseline exists
-it runs in raw-times mode: the ``score`` column is dropped and the headline is omitted.
+The txt report is pure ASCII, ≤90 columns, deterministic ordering (registry order, fixed
+category order, fixed rounding) so two pasted reports ``diff`` cleanly. Every per-task row
+shows the timing (median/min) right beside the score; when no baseline exists it runs in
+raw-times mode: the ``score`` column is dropped and the headline is omitted.
 """
 
 from __future__ import annotations
 
 from cpubench import CATEGORY_LABELS, CATEGORY_ORDER, registry
 
-WIDTH = 72
+WIDTH = 90
 MAJOR = "=" * WIDTH
 MINOR = "-" * WIDTH
 
@@ -24,6 +25,12 @@ def _2dp(x: float | None) -> str:
     if x is None:
         return "-"
     return f"{x:.2f}"
+
+
+def _rss(x: float | None) -> str:
+    if x is None:
+        return "-"
+    return f"{x:.0f}"
 
 
 def _ordered_entries() -> list[tuple[str, str]]:
@@ -144,14 +151,18 @@ def _per_task(document: dict, scores: dict, bucket: str | None) -> list[str]:
     per_task = entry.get("per_task", {}) if not raw_mode else {}
     results = {r["task"]: r for r in document.get("results", [])}
 
-    if raw_mode or not per_task:
-        header = " PER-TASK                                       median(s)     cv"
-        lines = [MINOR, header, MINOR]
-        scored = False
-    else:
-        header = " PER-TASK                                  score   median(s)     cv"
-        lines = [MINOR, header, MINOR]
-        scored = True
+    scored = bool(per_task) and not raw_mode
+
+    # Column suffix (right-aligned), identical widths for the header titles and the data rows
+    # so scores and timings line up. Timings (median + min) sit beside the score.
+    def _cols(score, median, mn, cv, rss) -> str:
+        out = f"{score:>7}" if scored else ""
+        return out + f"{median:>11}{mn:>11}{cv:>7}{rss:>9}"
+
+    name_w = 27
+    head = " PER-TASK".ljust(3 + name_w)
+    head += _cols("score", "median(s)", "min(s)", "cv", "rss(MB)")
+    lines = [MINOR, head, MINOR]
 
     last_cat = None
     for cat, name in _ordered_entries():
@@ -161,16 +172,16 @@ def _per_task(document: dict, scores: dict, bucket: str | None) -> list[str]:
         if cat != last_cat:
             lines.append(f" {CATEGORY_LABELS[cat]}")
             last_cat = cat
-        median = r.get("median_s")
-        cv = r.get("cv")
+        prefix = f"   {name:<{name_w}}"
         if r.get("status") != "ok":
-            lines.append(f"   {name:<40}{'FAILED':>10}")
+            lines.append(prefix + (f"{'-':>7}" if scored else "") + f"{'FAILED':>11}")
             continue
-        if scored:
-            sc = per_task.get(name)
-            lines.append(f"   {name:<36}{_2dp(sc):>6}{_sig3(median):>11}{_2dp(cv):>8}")
-        else:
-            lines.append(f"   {name:<42}{_sig3(median):>10}{_2dp(cv):>8}")
+        sc = _2dp(per_task.get(name)) if scored else ""
+        lines.append(
+            prefix
+            + _cols(sc, _sig3(r.get("median_s")), _sig3(r.get("min_s")),
+                    _2dp(r.get("cv")), _rss(r.get("peak_rss_mb")))
+        )
     return lines
 
 
