@@ -1,4 +1,4 @@
-"""Report snapshot/format tests: ≤72 cols, deterministic, raw vs scored modes."""
+"""Report snapshot/format tests: width<=90, deterministic, raw vs scored modes."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _raw_doc():
 def test_raw_report_width_and_content():
     txt = reporting.render_txt(_raw_doc())
     for line in txt.splitlines():
-        assert len(line) <= 72, f"line exceeds 72 cols: {line!r}"
+        assert len(line) <= reporting.WIDTH, f"line exceeds report width: {line!r}"
     assert "no baseline" in txt
     assert "la_gemm" in txt
     assert "FAILED" in txt  # failed task shown
@@ -87,7 +87,7 @@ def test_scored_report_shows_integer_overall():
     }
     txt = reporting.render_txt(doc)
     for line in txt.splitlines():
-        assert len(line) <= 72
+        assert len(line) <= reporting.WIDTH
     assert "142" in txt  # integer headline
     assert "Linalg" in txt and "171" in txt  # category score ×100, integer
 
@@ -110,7 +110,7 @@ def test_sweep_shows_single_core_column_and_scaling():
     }
     txt = reporting.render_txt(doc)
     for line in txt.splitlines():
-        assert len(line) <= 72
+        assert len(line) <= reporting.WIDTH
     assert "1-core" in txt
     assert "96" in txt  # single-core headline
     assert "scaling (all / 1-core)" in txt
@@ -130,7 +130,7 @@ def test_e_core_block_only_when_heterogeneous():
     }
     txt = reporting.render_txt(doc)
     for line in txt.splitlines():
-        assert len(line) <= 72
+        assert len(line) <= reporting.WIDTH
     assert "E-CORE CONTRIBUTION" in txt
     assert "0.31" in txt
     # homogeneous (no e_core_delta) → block absent
@@ -154,5 +154,5 @@ def test_long_notes_lists_wrap_under_72():
     ]
     txt = reporting.render_txt(doc)
     for line in txt.splitlines():
-        assert len(line) <= 72, f"line exceeds 72 cols: {line!r}"
+        assert len(line) <= reporting.WIDTH, f"line exceeds report width: {line!r}"
     assert "noisy (cv>0.10)" in txt

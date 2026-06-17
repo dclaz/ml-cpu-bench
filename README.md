@@ -206,8 +206,9 @@ Every run writes two files (default into `results/<run_id>.{json,txt}`):
 - An **authoritative JSON** (`schema_version: 1`) with full per-config detail: all raw reps,
   median/min/std/cv, `peak_rss_mb`, `cpu_wall_ratio`, checksum, status, and the detected
   environment.
-- A **plain-text report** (§7.3): pure ASCII, ≤72 columns, deterministic ordering — built to
-  paste into an issue/gist and `diff` cleanly. `--format md|html` emits those too.
+- A **plain-text report** (§7.3): pure ASCII, ≤90 columns, deterministic ordering — built to
+  paste into an issue/gist and `diff` cleanly. Each per-task row shows the **score next to its
+  timing** (median/min/cv) and peak RSS. `--format md|html` emits those too.
 
 ### Scores are deferred (raw-times mode)
 

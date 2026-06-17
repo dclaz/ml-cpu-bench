@@ -57,8 +57,9 @@ def detect_blas() -> tuple[str | None, int | None]:
     """Return ``(blas_backend, blas_threads_detected)``.
 
     Prefers ``threadpoolctl`` (which loads numpy/scipy and inspects the live shared
-    libraries); falls back to ``numpy.show_config()`` string scraping. Accelerate on
-    macOS-arm64 is the finickiest — kept in one place with clear fallbacks.
+    libraries); falls back to ``numpy.show_config(mode="dicts")`` (structured, so it needs no
+    pyyaml and emits no "Install pyyaml" warning). Accelerate on macOS-arm64 is the finickiest
+    — kept in one place with clear fallbacks.
     """
     backend: str | None = None
     threads: int | None = None
@@ -86,20 +87,17 @@ def detect_blas() -> tuple[str | None, int | None]:
 
     if backend is None:
         try:
-            import contextlib
-            import io
-
             import numpy as np
 
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                np.show_config()
-            text = buf.getvalue().lower()
-            if "mkl" in text:
+            # mode="dicts" returns structured config — no yaml rendering, no pyyaml warning.
+            cfg = np.show_config(mode="dicts") or {}
+            blas = (cfg.get("Build Dependencies", {}) or {}).get("blas", {}) or {}
+            name = (blas.get("name") or "").lower()
+            if "mkl" in name:
                 backend = "MKL"
-            elif "accelerate" in text:
+            elif "accelerate" in name or "veclib" in name:
                 backend = "Accelerate"
-            elif "openblas" in text:
+            elif "openblas" in name:
                 backend = "OpenBLAS"
         except Exception:
             pass
