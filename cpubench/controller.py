@@ -184,6 +184,15 @@ def run_benchmark(args: argparse.Namespace) -> int:
     topo = affinity.detect_pe_topology()
     env = environment.detect_environment(perf_cores=topo["perf_cores"], eff_cores=topo["eff_cores"])
 
+    cores_desc = f"{env['physical_cores']} physical / {env['logical_cores']} logical"
+    cores_desc += (
+        f"  ({env['perf_cores']}P + {env['eff_cores']}E)"
+        if env["perf_cores"]
+        else "  (homogeneous)"
+    )
+    print(f"CPU    {env['cpu_model']} ({env['arch']})")
+    print(f"Cores  {cores_desc}   BLAS {env['blas_backend']}")
+
     if env["baseline_load_pct"] is not None and env["baseline_load_pct"] > 25.0:
         sys.stderr.write(
             f"WARNING: machine not idle (load {env['baseline_load_pct']}%); results may be noisy.\n"
@@ -216,7 +225,9 @@ def run_benchmark(args: argparse.Namespace) -> int:
     n = len(configs)
     width = len(str(n))
     multi_leg = len(legs) > 1
-    leg_names = ", ".join(_leg_name(leg["threads_mode"], leg["cores"]) for leg in legs)
+    leg_names = ", ".join(
+        f"{_leg_name(leg['threads_mode'], leg['cores'])} [{leg['threads']}t]" for leg in legs
+    )
     label_w = 46 if multi_leg else 34
     print(f"Running {n} configs (mode={args.mode}, {len(legs)} leg(s): {leg_names})...")
     results: list[dict] = []
