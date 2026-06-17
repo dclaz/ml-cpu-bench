@@ -90,13 +90,51 @@ def _score_summary(document: dict, scores: dict, bucket: str | None) -> list[str
         lines.append("   OVERALL  (no baseline -- raw times only)")
         return lines
 
+    # --sweep: show the single-core column beside all-cores (per-core vs whole-machine).
+    single = scores.get("single_core", {})
+    swept = single.get("headline") is not None
+    by_cat = entry.get("by_category", {})
+    single_cat = single.get("by_category", {})
+
+    if swept:
+        lines.append(f"   {'':<31}{'all':>5}{'1-core':>8}")
+        lines.append(f"   {'OVERALL':<31}{round(headline):>5}{round(single['headline']):>8}")
+        lines.append("   " + "." * 31)
+        for cat in CATEGORY_ORDER:
+            if cat in by_cat:
+                sc_one = round(single_cat[cat] * 100) if cat in single_cat else "-"
+                lines.append(
+                    f"   {CATEGORY_LABELS[cat]:<31}{round(by_cat[cat] * 100):>5}{sc_one:>8}"
+                )
+        scaling = headline / single["headline"] if single["headline"] else 0.0
+        lines.append("   " + "." * 31)
+        lines.append(f"   {'scaling (all / 1-core)':<31}{scaling:>5.2f}")
+        return lines
+
     lines.append(f"   {'OVERALL  (all cores)':<34}{round(headline):>5}")
     lines.append("   " + "." * 34)
-    by_cat = entry.get("by_category", {})
     for cat in CATEGORY_ORDER:
         if cat in by_cat:
-            label = CATEGORY_LABELS[cat]
-            lines.append(f"   {label:<34}{round(by_cat[cat] * 100):>5}")
+            lines.append(f"   {CATEGORY_LABELS[cat]:<34}{round(by_cat[cat] * 100):>5}")
+    return lines
+
+
+def _e_core_block(document: dict, scores: dict) -> list[str]:
+    """Heterogeneous-only E-CORE CONTRIBUTION block (omitted on homogeneous chips)."""
+    delta = scores.get("e_core_delta")
+    if not delta:
+        return []
+    lines = [MINOR, " E-CORE CONTRIBUTION            e_core_delta  (>0 => E-cores help)"]
+    p_entry = scores.get("p_cores", {})
+    p_headline = p_entry.get("headline")
+    if p_headline is not None:
+        lines.append(f"   p-cores overall:   {round(p_headline)}")
+    swept = scores.get("single_core", {}).get("headline") is not None
+    if not swept:
+        lines.append("   (single-P-core leg absent; pass --sweep for the full triplet)")
+    for _cat, name in _ordered_entries():
+        if name in delta:
+            lines.append(f"   {name:<40}{delta[name]:>8.2f}")
     return lines
 
 
@@ -191,6 +229,7 @@ def render_txt(document: dict, *, summary: bool = False) -> str:
 
     lines = _header_lines(document, overall)
     lines += _score_summary(document, scores, bucket)
+    lines += _e_core_block(document, scores)
     if not summary:
         lines += _per_task(document, scores, bucket)
         lines += _notes(document, scores, bucket)
@@ -226,3 +265,71 @@ def render_alt(document: dict, *, fmt: str = "md") -> str:
     if fmt == "html":
         return f"<html><body><pre>\n{txt}</pre></body></html>\n"
     return txt
+
+
+def print_rich(document: dict, console=None) -> None:
+    """Coloured console table (SPEC §7.2): per-task median/cv/RSS grouped by category.
+
+    Noisy rows are marked, pandas vs Polars sit on adjacent rows (engine in the name), and the
+    canonical copy-paste artifact remains the §7.3 txt report. Falls back to txt if rich is
+    unavailable.
+    """
+    try:
+        from rich.console import Console
+        from rich.table import Table
+    except Exception:  # pragma: no cover - rich is a core dep, defensive only
+        print(render_txt(document))
+        return
+
+    console = console or Console()
+    scores = document.get("scores", {})
+    bucket = _primary_bucket(scores)
+    scored = scores.get("reference_present") and (scores.get(bucket, {}) or {}).get("per_task")
+    per_task = (scores.get(bucket, {}) or {}).get("per_task", {}) if scored else {}
+    results = {r["task"]: r for r in document.get("results", [])}
+
+    env = document.get("environment", {})
+    cfg = document.get("config", {})
+    overall = (
+        str(round(scores[bucket]["headline"]))
+        if scored and scores[bucket].get("headline") is not None
+        else "raw times (no baseline)"
+    )
+    bench = document.get("benchmark_version", "?")
+    console.rule(f"[bold]ml-cpu-bench {bench}[/]  OVERALL {overall}")
+    console.print(
+        f"{env.get('cpu_model')} ({env.get('arch')})  |  "
+        f"{cfg.get('threads')} threads / cores={cfg.get('cores')}  |  "
+        f"BLAS {env.get('blas_backend')}"
+    )
+
+    table = Table(show_lines=False, header_style="bold")
+    table.add_column("task")
+    if scored:
+        table.add_column("score", justify="right")
+    table.add_column("median(s)", justify="right")
+    table.add_column("cv", justify="right")
+    table.add_column("RSS(MB)", justify="right")
+
+    last_cat = None
+    for cat, name in _ordered_entries():
+        r = results.get(name)
+        if r is None:
+            continue
+        if cat != last_cat:
+            span = 5 if scored else 4
+            table.add_row(*([f"[bold cyan]{CATEGORY_LABELS[cat]}[/]"] + [""] * (span - 1)))
+            last_cat = cat
+        if r.get("status") != "ok":
+            cells = [f"[dim]{name}[/]", "[red]FAILED[/]"]
+            cells += [""] * ((5 if scored else 4) - len(cells))
+            table.add_row(*cells)
+            continue
+        style = "yellow" if r.get("noisy") else None
+        row = [f"  {name}"]
+        if scored:
+            row.append(_2dp(per_task.get(name)))
+        row += [_sig3(r.get("median_s")), _2dp(r.get("cv")), _sig3(r.get("peak_rss_mb"))]
+        table.add_row(*row, style=style)
+
+    console.print(table)

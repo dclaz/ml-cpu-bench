@@ -48,6 +48,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp.add_argument("a")
     p_cmp.add_argument("b")
 
+    p_bake = sub.add_parser(
+        "bake-baseline",
+        help="extract baselines/reference.json from a --sweep results JSON",
+    )
+    p_bake.add_argument("file", help="a results JSON produced with --sweep")
+    p_bake.add_argument(
+        "--reference-version", required=True, help="identity stamp, e.g. dev-2026.06 or ref-2026.06"
+    )
+    p_bake.add_argument(
+        "--out", default=None, help="output path (default: baselines/reference.json)"
+    )
+    p_bake.add_argument(
+        "--force", action="store_true", help="overwrite an existing baseline file"
+    )
+
     # internal: run a single config in this process (worker entry point).
     p_worker = sub.add_parser("_worker", help=argparse.SUPPRESS)
     p_worker.add_argument("--config-file", required=True)
@@ -116,6 +131,36 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return compare_runs(args.a, args.b)
 
 
+def cmd_bake_baseline(args: argparse.Namespace) -> int:
+    import json
+    import os
+
+    from cpubench import scoring
+
+    with open(args.file) as fh:
+        document = json.load(fh)
+    payload = scoring.extract_baseline(document, reference_version=args.reference_version)
+    n_all = len(payload["baselines"].get("all_cores", {}))
+    n_single = len(payload["baselines"].get("single_core", {}))
+    if not n_single:
+        print(
+            "WARNING: no single_core medians found — run the suite with --sweep to capture "
+            "both buckets before baking a baseline."
+        )
+    out = args.out or scoring.BASELINE_PATH
+    if os.path.exists(out) and not args.force:
+        print(f"REFUSING: {out} exists (use --force to overwrite).")
+        return 2
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    with open(out, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    print(
+        f"Wrote {out}  (reference_version={args.reference_version}, "
+        f"all_cores={n_all} tasks, single_core={n_single} tasks)"
+    )
+    return 0
+
+
 def cmd_worker(args: argparse.Namespace) -> int:
     from cpubench.worker import worker_main
 
@@ -128,6 +173,7 @@ _DISPATCH = {
     "run": cmd_run,
     "report": cmd_report,
     "compare": cmd_compare,
+    "bake-baseline": cmd_bake_baseline,
     "_worker": cmd_worker,
 }
 

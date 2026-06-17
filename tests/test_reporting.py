@@ -97,6 +97,53 @@ def test_summary_omits_per_task():
     assert "PER-TASK" not in txt
 
 
+def test_sweep_shows_single_core_column_and_scaling():
+    doc = _raw_doc()
+    doc["reference_version"] = "fixture-1"
+    doc["config"]["sweep"] = True
+    doc["scores"] = {
+        "reference_present": True,
+        "all_cores": {"headline": 142.0, "by_category": {"linalg": 1.71},
+                      "per_task": {"la_gemm": 1.55}, "empty_categories": []},
+        "single_core": {"headline": 96.0, "by_category": {"linalg": 1.10},
+                        "per_task": {"la_gemm": 1.0}, "empty_categories": []},
+    }
+    txt = reporting.render_txt(doc)
+    for line in txt.splitlines():
+        assert len(line) <= 72
+    assert "1-core" in txt
+    assert "96" in txt  # single-core headline
+    assert "scaling (all / 1-core)" in txt
+    assert "1.48" in txt  # 142 / 96
+
+
+def test_e_core_block_only_when_heterogeneous():
+    doc = _raw_doc()
+    doc["reference_version"] = "fixture-1"
+    doc["scores"] = {
+        "reference_present": True,
+        "all_cores": {"headline": 140.0, "by_category": {"linalg": 1.4},
+                      "per_task": {"la_gemm": 1.4}, "empty_categories": []},
+        "p_cores": {"headline": 138.0, "by_category": {"linalg": 1.38},
+                    "per_task": {"la_gemm": 1.38}},
+        "e_core_delta": {"la_gemm": 0.31},
+    }
+    txt = reporting.render_txt(doc)
+    for line in txt.splitlines():
+        assert len(line) <= 72
+    assert "E-CORE CONTRIBUTION" in txt
+    assert "0.31" in txt
+    # homogeneous (no e_core_delta) → block absent
+    doc["scores"].pop("e_core_delta")
+    doc["scores"].pop("p_cores")
+    assert "E-CORE CONTRIBUTION" not in reporting.render_txt(doc)
+
+
+def test_print_rich_runs():
+    # smoke: rich rendering should not raise on a raw-mode doc
+    reporting.print_rich(_raw_doc())
+
+
 def test_long_notes_lists_wrap_under_72():
     doc = _raw_doc()
     # many noisy tasks → the NOTES list must wrap, never exceed 72 cols
