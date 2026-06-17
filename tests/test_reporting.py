@@ -139,6 +139,64 @@ def test_e_core_block_only_when_heterogeneous():
     assert "E-CORE CONTRIBUTION" not in reporting.render_txt(doc)
 
 
+def _leg(task, cat, cores, threads, median, **kw):
+    return {"task": task, "category": cat, "status": kw.get("status", "ok"),
+            "threads_mode": "all", "cores": cores, "threads": threads,
+            "median_s": median, "min_s": (median * 0.98 if median else None),
+            "cv": kw.get("cv", 0.03), "peak_rss_mb": 120.0,
+            "swapped": kw.get("swapped", False), "noisy": kw.get("noisy", False),
+            "enforcement": "none", "backend_sensitive": False}
+
+
+def _hetero_doc(results):
+    from cpubench import scoring
+
+    doc = {
+        "benchmark_version": "1.1.0", "reference_version": None, "run_id": "sim",
+        "environment": {**_ENV, "perf_cores": 4, "eff_cores": 4, "physical_cores": 8,
+                        "logical_cores": 8},
+        "config": {"mode": "quick", "threads_mode": "all", "threads": 8, "cores": "all",
+                   "seed": 1337, "repeat": 5, "warmup": True},
+        "results": results,
+    }
+    doc["scores"] = scoring.score_run(doc, baseline_path="/does-not-exist.json")
+    return doc
+
+
+def test_per_task_shows_primary_all_cores_leg():
+    # la_gemm runs on both legs; the all-cores leg (0.06) must be the one displayed.
+    doc = _hetero_doc([
+        _leg("la_gemm", "linalg", "all", 8, 0.06),
+        _leg("la_gemm", "linalg", "p", 4, 0.10),
+    ])
+    txt = reporting.render_txt(doc)
+    # the PER-TASK row carries the RSS column ("120"); the E-CORE row does not
+    pt_lines = [
+        line for line in txt.splitlines()
+        if line.strip().startswith("la_gemm") and "120" in line
+    ]
+    assert len(pt_lines) == 1
+    assert "0.06" in pt_lines[0]  # all-cores leg, not the 0.10 p-cores leg
+
+
+def test_notes_dedup_and_split_failed_vs_swapped():
+    doc = _hetero_doc([
+        _leg("md_rf", "models", "all", 8, 2.46, swapped=True),
+        _leg("md_rf", "models", "p", 4, 3.0, swapped=True),
+        _leg("cl_gmm", "clustering", "all", 8, None, status="failed"),
+        _leg("cl_gmm", "clustering", "p", 4, None, status="failed"),
+    ])
+    txt = reporting.render_txt(doc)
+    for line in txt.splitlines():
+        assert len(line) <= reporting.WIDTH
+    assert "swapped (excluded):" in txt
+    assert "failed:" in txt
+    # leg-annotated and deduped (each leg once, not doubled into a single token)
+    assert "md_rf (all-cores)" in txt and "md_rf (P-cores)" in txt
+    assert txt.count("md_rf (all-cores)") == 1
+    assert "cl_gmm (all-cores)" in txt
+
+
 def test_print_rich_runs():
     # smoke: rich rendering should not raise on a raw-mode doc
     reporting.print_rich(_raw_doc())

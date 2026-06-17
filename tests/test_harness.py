@@ -102,6 +102,34 @@ def test_runner_read_only_and_rep_count():
     assert "median_s" in stats and "cv" in stats
 
 
+def test_swap_flag_requires_memory_bound(monkeypatch):
+    import types
+
+    import psutil as _psutil
+
+    from cpubench.memory import MemorySampler
+
+    zero = types.SimpleNamespace(sin=0, sout=0)
+    bumped = types.SimpleNamespace(sin=100, sout=100)  # swap activity occurred
+
+    # Tiny task (RSS far below RAM) → system-wide swap delta must NOT flag it.
+    s = MemorySampler()
+    s._ram_total = 1_000_000
+    s.peak_bytes = 50_000  # 5% of RAM
+    s._swap0 = zero
+    monkeypatch.setattr(_psutil, "swap_memory", lambda: bumped)
+    _, swapped = s.stop()
+    assert swapped is False
+
+    # Memory-bound task (RSS near the ceiling) with the same swap delta → flagged.
+    s2 = MemorySampler()
+    s2._ram_total = 1_000_000
+    s2.peak_bytes = 960_000  # 96% of RAM
+    s2._swap0 = zero
+    _, swapped2 = s2.stop()
+    assert swapped2 is True
+
+
 def test_runner_noisy_flag():
     ctx = RunContext(data=np.zeros(1), params={}, threads=1, rng=np.random.default_rng(0))
     # constant work → low cv → not noisy
