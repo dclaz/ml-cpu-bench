@@ -180,8 +180,9 @@ def test_spawn_worker_end_to_end(tmp_path):
         cooldown=0.0,
     )
     partial = str(tmp_path / "r.json")
-    status = controller._spawn(cfg, topo, partial)
+    status, reason = controller._spawn(cfg, topo, partial)
     assert status == "ok"
+    assert reason is None
     import json
 
     result = json.load(open(partial))
@@ -189,3 +190,58 @@ def test_spawn_worker_end_to_end(tmp_path):
     assert result["task"] == "la_gemm"
     assert result["median_s"] >= 0.0
     assert len(result["reps_s"]) == 2
+
+
+# --------------------------------------------------------------------------- failure path
+def test_stderr_reason_oom_signal():
+    assert "signal 9" in controller._stderr_reason(-9, "")
+    assert "OOM" in controller._stderr_reason(-9, "")
+
+
+def test_stderr_reason_nonzero_uses_last_line():
+    reason = controller._stderr_reason(1, "Traceback ...\nValueError: bad input\n")
+    assert "exited 1" in reason and "ValueError: bad input" in reason
+
+
+def test_failed_entry_carries_reason():
+    cfg = registry.RunConfig(
+        task="la_gemm", category="linalg", engine=None, mode="quick", params={"N": 1},
+        threads=4, threads_mode="all", cores="all", backend_sensitive=True,
+    )
+    entry = controller._failed_entry(cfg, "worker killed by signal 9 (likely OOM)")
+    assert entry["status"] == "failed"
+    assert entry["error"] == "worker killed by signal 9 (likely OOM)"
+    assert entry["median_s"] is None
+
+
+def _full_run_args(**kw):
+    base = dict(
+        mode="quick", threads=None, sweep=False, cores="all", tasks=None, exclude=None,
+        repeat=2, seed=1337, cooldown=0.0, timeout=120.0, no_warmup=True, resume=False,
+        out=None, format="txt", summary=False, no_report=True,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_resume_skips_existing_partial(tmp_path, monkeypatch):
+    import glob
+
+    monkeypatch.chdir(tmp_path)
+    # First run: real spawn of a single small task.
+    controller.run_benchmark(_full_run_args(tasks="la_gemm"))
+    assert glob.glob(os.path.join(controller.PARTIAL_DIR, "la_gemm__none__quick__*.json"))
+
+    # Second run with --resume: _spawn must NOT be called (partial already exists).
+    called = []
+    monkeypatch.setattr(controller, "_spawn", lambda *a, **k: called.append(1) or ("ok", None))
+    rc = controller.run_benchmark(_full_run_args(tasks="la_gemm", resume=True))
+    assert rc == 0
+    assert called == [], "resume re-spawned a config whose partial file already exists"
+
+
+def test_unknown_task_name_warns(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    # no real tasks selected → no spawns; just exercise the warning path
+    controller.run_benchmark(_full_run_args(tasks="la_gemm,not_a_real_task"))
+    assert "not_a_real_task" in capsys.readouterr().err

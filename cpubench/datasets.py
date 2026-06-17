@@ -286,29 +286,32 @@ def doc_term_counts(params, rng, engine=None):
 
 # --------------------------------------------------------------------------- text corpora
 def token_corpus(params, rng, engine=None):
-    """Synthetic Zipfian token corpus: list of space-joined token strings."""
+    """Synthetic Zipfian token corpus: list of space-joined token strings.
+
+    The weighted token draw is done in a single vectorized ``rng.choice`` over the whole
+    corpus (deterministic per seed); only the per-doc string join remains in Python.
+    """
     n_docs = int(params["n_docs"])
     vocab = int(params.get("vocab", 30_000))
     tokens_per = int(params.get("tokens_per_doc", 80))
     # Zipfian-ish weights over vocab
-    ranks = np.arange(1, vocab + 1)
-    weights = 1.0 / ranks
+    weights = 1.0 / np.arange(1, vocab + 1)
     weights /= weights.sum()
     vocab_words = np.array([f"tok{j}" for j in range(vocab)])
-    docs = []
-    for _ in range(n_docs):
-        idx = rng.choice(vocab, size=tokens_per, p=weights)
-        docs.append(" ".join(vocab_words[idx]))
-    return docs
+    idx = rng.choice(vocab, size=(n_docs, tokens_per), p=weights)
+    words = vocab_words[idx]  # (n_docs, tokens_per) str array
+    return [" ".join(row) for row in words]
 
 
 def fhash_rows(params, rng, engine=None):
-    """High-cardinality ``field=value`` string rows for FeatureHasher (materialized input)."""
+    """High-cardinality ``field=value`` string rows for FeatureHasher (materialized input).
+
+    Integer draws and ``field=value`` formatting are vectorized per column; the materialized
+    millions of short strings (the real memory driver) are inherent to the task.
+    """
     n = int(params["n_samples"])
     n_fields = int(params["n_fields"])
     cardinality = int(params.get("cardinality", 1_000_000))
-    rows = []
-    for _ in range(n):
-        vals = rng.integers(0, cardinality, size=n_fields, dtype=np.int64)
-        rows.append([f"f{j}={vals[j]}" for j in range(n_fields)])
-    return rows
+    vals = rng.integers(0, cardinality, size=(n, n_fields), dtype=np.int64)
+    cols = [np.char.add(f"f{j}=", vals[:, j].astype(str)) for j in range(n_fields)]
+    return np.stack(cols, axis=1).tolist()

@@ -249,10 +249,14 @@ def fe_expanding(params, ctx):
     if ctx.engine == "pandas":
         import pandas as pd
 
-        g = df.groupby("entity_id")["target"]
+        gid = df["entity_id"]
         with ctx.timer():
-            prior_mean = g.apply(lambda s: s.shift(1).expanding(min_periods=1).mean())
-            prior_mean = prior_mean.reset_index(level=0, drop=True)
+            # Vectorized leakage-safe expanding mean of prior obs (matches the Polars
+            # cum_sum / cum_count form): prior_mean[k] = mean(target[0..k-1]) per entity.
+            shifted = df.groupby("entity_id")["target"].shift(1)
+            csum = shifted.groupby(gid).cumsum()
+            cnt = shifted.notna().groupby(gid).cumsum()
+            prior_mean = csum / cnt.where(cnt > 0)
             norm = df["target"] / prior_mean.replace(0.0, np.nan)
             out = pd.DataFrame({"prior_mean": prior_mean, "norm": norm})
         return _shape(out)

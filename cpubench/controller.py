@@ -54,8 +54,20 @@ def build_legs(args: argparse.Namespace, topo: dict) -> list[dict]:
     return legs
 
 
-def _spawn(config: registry.RunConfig, topo: dict, partial_path: str) -> str:
-    """Run one config in a subprocess. Return its status: 'ok' | 'failed'."""
+def _stderr_reason(returncode: int, stderr: str) -> str:
+    """Build a concise failure reason from a worker's exit code + stderr tail."""
+    if returncode < 0:  # killed by signal (POSIX); -9 = SIGKILL, the OOM-killer's signature
+        sig = -returncode
+        hint = " (likely OOM)" if sig == 9 else ""
+        return f"worker killed by signal {sig}{hint}"
+    # Last non-empty stderr line is usually the exception type + message.
+    tail = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    detail = tail[-1] if tail else "no stderr"
+    return f"worker exited {returncode}: {detail}"[:300]
+
+
+def _spawn(config: registry.RunConfig, topo: dict, partial_path: str) -> tuple[str, str | None]:
+    """Run one config in a subprocess. Return ``(status, reason)``; reason is None on success."""
     cfg_dict = {
         "task": config.task,
         "engine": config.engine,
@@ -79,17 +91,18 @@ def _spawn(config: registry.RunConfig, topo: dict, partial_path: str) -> str:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if proc.returncode != 0:
-            sys.stderr.write(
-                f"[worker {config.config_id}] exit {proc.returncode}\n{proc.stderr[-2000:]}\n"
-            )
-            return "failed"
+            reason = _stderr_reason(proc.returncode, proc.stderr)
+            sys.stderr.write(f"[worker {config.config_id}] {reason}\n{proc.stderr[-2000:]}\n")
+            return "failed", reason
         if not os.path.exists(partial_path):
-            sys.stderr.write(f"[worker {config.config_id}] no result file written\n")
-            return "failed"
-        return "ok"
+            reason = "worker exited 0 but wrote no result file"
+            sys.stderr.write(f"[worker {config.config_id}] {reason}\n")
+            return "failed", reason
+        return "ok", None
     except subprocess.TimeoutExpired:
-        sys.stderr.write(f"[worker {config.config_id}] TIMEOUT after {timeout}s\n")
-        return "failed"
+        reason = f"timeout after {timeout}s"
+        sys.stderr.write(f"[worker {config.config_id}] {reason.upper()}\n")
+        return "failed", reason
     finally:
         try:
             os.unlink(cfg_path)
@@ -144,6 +157,13 @@ def run_benchmark(args: argparse.Namespace) -> int:
     tasks = args.tasks.split(",") if args.tasks else None
     exclude = args.exclude.split(",") if args.exclude else None
 
+    known = registry.all_task_names()
+    unknown = sorted(set((tasks or []) + (exclude or [])) - known)
+    if unknown:
+        sys.stderr.write(
+            f"WARNING: unknown task name(s) in --tasks/--exclude: {', '.join(unknown)}\n"
+        )
+
     configs = registry.expand_configs(
         mode=args.mode,
         legs=legs,
@@ -170,12 +190,12 @@ def run_benchmark(args: argparse.Namespace) -> int:
         if os.path.exists(partial_path):
             os.unlink(partial_path)
         print(f"{label}  running...", flush=True)
-        status = _spawn(config, topo, partial_path)
+        status, reason = _spawn(config, topo, partial_path)
         if status == "ok":
             with open(partial_path) as fh:
                 results.append(json.load(fh))
         else:
-            results.append(_failed_entry(config, "worker failed / timeout / OOM"))
+            results.append(_failed_entry(config, reason or "worker failed"))
         if config.cooldown and i < len(configs):
             time.sleep(config.cooldown)
 
@@ -219,11 +239,16 @@ def run_benchmark(args: argparse.Namespace) -> int:
     if not args.no_report:
         from cpubench import reporting
 
+        # Canonical artifact: the §7.3 plain-text report, always written to disk.
         report_text = reporting.render_txt(document, summary=args.summary)
         report_path = os.path.splitext(out_path)[0] + ".txt"
         with open(report_path, "w") as fh:
             fh.write(report_text)
-        print(report_text)
+        # Console: rich table (§7.2) for a full run; the txt summary for --summary.
+        if args.summary:
+            print(report_text)
+        else:
+            reporting.print_rich(document)
         print(f"Report: {report_path}")
         if args.format in ("md", "html"):
             extra = reporting.render_alt(document, fmt=args.format)

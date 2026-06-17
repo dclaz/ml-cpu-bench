@@ -25,17 +25,31 @@ def _lib_version(name: str) -> str | None:
 
 
 def _cpu_model() -> str:
-    # platform.processor() is often empty on Linux; fall back to /proc/cpuinfo.
+    # platform.processor() is often empty/generic; fall back to OS-specific sources.
     model = platform.processor()
     if model and model != platform.machine():
         return model
-    try:
+    try:  # Linux
         with open("/proc/cpuinfo") as fh:
             for line in fh:
                 if line.lower().startswith("model name"):
                     return line.split(":", 1)[1].strip()
     except OSError:
         pass
+    if platform.system() == "Darwin":  # macOS: marketing name, not the generic arch string
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:
+            pass
     return platform.machine() or "unknown"
 
 

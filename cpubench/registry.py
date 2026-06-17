@@ -89,6 +89,11 @@ def get_task(name: str) -> TaskSpec:
     raise KeyError(name)
 
 
+def all_task_names() -> set[str]:
+    load_all_tasks()
+    return {spec.name for spec in _REGISTRY}
+
+
 def scored_name(name: str, engine: str | None) -> str:
     return f"{name}[{engine}]" if engine else name
 
