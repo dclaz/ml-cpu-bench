@@ -20,6 +20,10 @@ def tiny_params(params: dict) -> dict:
         p["length"] = 2**12
     if "n_features" in p:
         p["n_features"] = min(p["n_features"], 500)
+    if "n_series" in p:
+        p["n_series"] = min(p["n_series"], 6)
+    if "series_len" in p:
+        p["series_len"] = min(p["series_len"], 64)
     if "entities" in p:
         p["entities"] = min(p["entities"], 100)
     if "vocab" in p:

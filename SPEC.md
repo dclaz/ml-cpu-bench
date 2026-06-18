@@ -381,7 +381,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 > `max_eps` with the ball-tree index keeps it from degenerating to the full O(n²) distance
 > matrix. Checksum is a tolerant invariant (cluster count + ordering hash).
 
-### 5.5 Model fitting — scikit-learn + LightGBM
+### 5.5 Model fitting — scikit-learn + LightGBM + statsforecast
 
 | Task | Op | Sizes (n × features) — quick → normal |
 |---|---|---|
@@ -398,6 +398,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 | `md_lgbm_multi` | LightGBM, **multiclass softmax, `num_class=10`** *(builds num_class × rounds trees; `normal` only)* | 200k×50, 250 rounds *(normal only)* |
 | `md_svc_rbf` | `SVC` RBF *(single-threaded dominator — kept small)* | 5k×30 → 15k×30 |
 | `md_knn` | `KNeighborsClassifier` brute, 1000 queries | 50k×50 → 200k×50 |
+| `md_autoarima` | statsforecast `AutoARIMA` (nonseasonal, `season_length=1`) fit across a panel of independent series with 1 exogenous regressor (relevant for ~half, noise for the rest), forecasting `horizon` steps; parallel over series via `n_jobs`. *(numba-JIT — warm-up absorbs first-call compile)* | 8 series × 96 pts, h=1 → 1024 series × 1024 pts, h=24 |
 
 > `md_rf_predict` measures **inference**, a distinct workload from training: tree
 > traversal that is cache-, latency-, and branch-prediction-bound rather than compute-bound, and
