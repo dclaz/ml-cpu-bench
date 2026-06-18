@@ -16,7 +16,7 @@ from cpubench.threading_ctl import resolve_n_jobs
     "sparse",
     data=datasets.token_corpus,
     sizes={
-        "quick": {"n_docs": 50_000, "vocab": 30_000, "tokens_per_doc": 80},
+        "quick": {"n_docs": 15_000, "vocab": 30_000, "tokens_per_doc": 80},
         "normal": {"n_docs": 300_000, "vocab": 30_000, "tokens_per_doc": 80},
     },
 )
@@ -34,7 +34,7 @@ def sp_tfidf(params, ctx):
     "sparse",
     data=datasets.token_corpus,
     sizes={
-        "quick": {"n_docs": 50_000, "vocab": 30_000, "tokens_per_doc": 80},
+        "quick": {"n_docs": 20_000, "vocab": 30_000, "tokens_per_doc": 80},
         "normal": {"n_docs": 300_000, "vocab": 30_000, "tokens_per_doc": 80},
     },
 )
@@ -88,7 +88,7 @@ def sp_matmul(params, ctx):
     "sparse",
     data=datasets.sparse_csr,
     sizes={
-        "quick": {"n_samples": 50_000, "n_features": 10_000, "density": 0.003},
+        "quick": {"n_samples": 6_000, "n_features": 4_000, "density": 0.003},
         "normal": {"n_samples": 200_000, "n_features": 50_000, "density": 0.003},
     },
 )
@@ -108,7 +108,7 @@ def sp_tsvd(params, ctx):
     "sparse",
     data=datasets.doc_term_tfidf,
     sizes={
-        "quick": {"n_samples": 20_000, "n_features": 10_000, "density": 0.004},
+        "quick": {"n_samples": 3_000, "n_features": 4_000, "density": 0.004},
         "normal": {"n_samples": 100_000, "n_features": 30_000, "density": 0.004},
     },
 )

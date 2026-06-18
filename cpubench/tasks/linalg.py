@@ -63,7 +63,7 @@ def la_cholesky(params, ctx):
     "linalg",
     data=datasets.rect_matrix,
     backend_sensitive=True,
-    sizes={"quick": {"rows": 3000, "cols": 1500}, "normal": {"rows": 10000, "cols": 4000}},
+    sizes={"quick": {"rows": 2000, "cols": 1000}, "normal": {"rows": 10000, "cols": 4000}},
 )
 def la_qr(params, ctx):
     import scipy.linalg as sla

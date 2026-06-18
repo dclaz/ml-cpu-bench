@@ -19,6 +19,7 @@ _THREAD_ENV_VARS = (
     "VECLIB_MAXIMUM_THREADS",
     "NUMEXPR_MAX_THREADS",
     "POLARS_MAX_THREADS",
+    "NUMBA_NUM_THREADS",  # statsforecast (AutoARIMA) JITs via numba
 )
 
 

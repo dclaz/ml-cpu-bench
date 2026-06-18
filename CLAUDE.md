@@ -24,9 +24,12 @@ uv run pytest                        # shape/dtype smoke tests
 uv run ruff check . && uv run ruff format .
 ```
 
-Stack: `numpy scipy scikit-learn pandas polars lightgbm threadpoolctl psutil rich`. Python
-**3.12** only. `uv.lock` is universal (Linux/macOS/Windows × x86_64/arm64). No `numba`/`umap`
-(removed). LightGBM needs an OpenMP runtime; on macOS document `brew install libomp` fallback.
+Stack: `numpy scipy scikit-learn pandas polars lightgbm statsforecast threadpoolctl psutil
+rich`. Python **3.12** only. `uv.lock` is universal (Linux/macOS/Windows × x86_64/arm64). No
+`umap`. **`numba` is back** as a transitive dep of `statsforecast` (the `md_autoarima` task):
+it JIT-compiles on first call, so the default warm-up rep absorbs the compile, and
+`NUMBA_NUM_THREADS` is pinned alongside the other thread-env vars. LightGBM needs an OpenMP
+runtime; on macOS document `brew install libomp` fallback.
 
 ---
 

@@ -12,7 +12,7 @@ from cpubench.registry import task
 from cpubench.threading_ctl import resolve_n_jobs, resolve_num_threads
 
 _REG_SIZES = {
-    "quick": {"n_samples": 200_000, "n_features": 100},
+    "quick": {"n_samples": 25_000, "n_features": 40},
     "normal": {"n_samples": 1_000_000, "n_features": 300},
 }
 _CLS_SIZES = {
@@ -99,7 +99,7 @@ def md_gpr(params, ctx):
     "models",
     data=datasets.classification_xy,
     sizes={
-        "quick": {"n_samples": 100_000, "n_features": 50, "n_classes": 3, "trees": 100},
+        "quick": {"n_samples": 25_000, "n_features": 50, "n_classes": 3, "trees": 40},
         "normal": {"n_samples": 200_000, "n_features": 50, "n_classes": 3, "trees": 300},
     },
 )
@@ -149,7 +149,7 @@ def md_rf_predict(params, ctx):
     "models",
     data=datasets.classification_xy,
     sizes={
-        "quick": {"n_samples": 200_000, "n_features": 50, "n_classes": 3, "iters": 100},
+        "quick": {"n_samples": 9_000, "n_features": 50, "n_classes": 3, "iters": 20},
         "normal": {"n_samples": 1_000_000, "n_features": 100, "n_classes": 3, "iters": 300},
     },
 )
@@ -169,7 +169,7 @@ def md_hist_gbm(params, ctx):
     "models",
     data=datasets.regression_xy,
     sizes={
-        "quick": {"n_samples": 200_000, "n_features": 50, "trees": 100},
+        "quick": {"n_samples": 20_000, "n_features": 50, "trees": 40},
         "normal": {"n_samples": 500_000, "n_features": 100, "trees": 500},
     },
 )
@@ -226,6 +226,34 @@ def md_svc_rbf(params, ctx):
     with ctx.timer():
         model = SVC(kernel="rbf", random_state=1337).fit(x, y)
     return {"n_sv": int(model.support_.shape[0])}
+
+
+@task(
+    "md_autoarima",
+    "models",
+    data=datasets.arima_panel,
+    sizes={
+        "quick": {"n_series": 8, "series_len": 96, "horizon": 1},
+        "normal": {"n_series": 1024, "series_len": 1024, "horizon": 24},
+    },
+)
+def md_autoarima(params, ctx):
+    from statsforecast import StatsForecast
+    from statsforecast.models import AutoARIMA
+
+    train_df, future_df = ctx.data
+    horizon = int(ctx.params["horizon"])
+    with ctx.timer():
+        sf = StatsForecast(
+            models=[AutoARIMA(season_length=1)],
+            freq=1,
+            n_jobs=resolve_n_jobs(ctx.threads),
+        )
+        fc = sf.forecast(df=train_df, h=horizon, X_df=future_df)
+    return {
+        "n_series": int(ctx.params["n_series"]),
+        "forecast_sum": round(float(fc["AutoARIMA"].fillna(0.0).sum()), 3),
+    }
 
 
 @task(

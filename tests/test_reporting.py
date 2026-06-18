@@ -197,9 +197,65 @@ def test_notes_dedup_and_split_failed_vs_swapped():
     assert "cl_gmm (all-cores)" in txt
 
 
+def test_csv_has_header_and_distinguishes_engines():
+    import csv
+    import io
+
+    doc = _hetero_doc([
+        _leg("dp_groupby[pandas]", "data_prep", "all", 8, 0.5),
+        _leg("dp_groupby[polars]", "data_prep", "all", 8, 0.3),
+    ])
+    doc["results"][0]["engine"] = "pandas"
+    doc["results"][1]["engine"] = "polars"
+    for r in doc["results"]:
+        r["reps_s"] = [0.5, 0.51, 0.49, 0.5, 0.5]
+        r["std_s"] = 0.01
+
+    text = reporting.render_csv(doc)
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert [c for c in reporting.CSV_COLUMNS] == list(rows[0].keys())
+    by_engine = {row["engine"]: row for row in rows}
+    assert set(by_engine) == {"pandas", "polars"}
+    assert by_engine["pandas"]["task"] == "dp_groupby[pandas]"
+    assert by_engine["polars"]["task"] == "dp_groupby[polars]"
+    assert by_engine["pandas"]["reps"] == "5"
+    assert by_engine["pandas"]["bucket"] == "all_cores"
+
+
+def test_csv_blank_score_without_baseline_and_failed_rows():
+    import csv
+    import io
+
+    doc = _hetero_doc([
+        _leg("la_gemm", "linalg", "all", 8, 0.06),
+        _leg("cl_gmm", "clustering", "all", 8, None, status="failed"),
+    ])
+    rows = list(csv.DictReader(io.StringIO(reporting.render_csv(doc))))
+    by_task = {row["task"]: row for row in rows}
+    assert by_task["la_gemm"]["score"] == ""  # raw mode → no score
+    assert by_task["cl_gmm"]["status"] == "failed"
+    assert by_task["cl_gmm"]["median_s"] == ""  # blank for failed
+
+
 def test_print_rich_runs():
     # smoke: rich rendering should not raise on a raw-mode doc
     reporting.print_rich(_raw_doc())
+
+
+def test_print_rich_shows_engine_column():
+    from rich.console import Console
+
+    doc = _hetero_doc([
+        _leg("dp_groupby[pandas]", "data_prep", "all", 8, 0.5),
+        _leg("dp_groupby[polars]", "data_prep", "all", 8, 0.3),
+    ])
+    doc["results"][0].update(engine="pandas", base_task="dp_groupby")
+    doc["results"][1].update(engine="polars", base_task="dp_groupby")
+    console = Console(record=True, width=100)
+    reporting.print_rich(doc, console=console)
+    text = console.export_text()
+    assert "engine" in text
+    assert "pandas" in text and "polars" in text
 
 
 def test_long_notes_lists_wrap_under_72():

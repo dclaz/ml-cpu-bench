@@ -60,7 +60,13 @@ uv run cpubench compare A B          # diff two runs (noise- and version-aware)
 Useful `run` flags: `--threads N` / `--cores all|p|e`, `--tasks t1,t2` / `--exclude t1`,
 `--repeat N` (default 5), `--seed S` (default 1337), `--timeout SECONDS` (per-config hang
 ceiling, default 3600, `0` disables), `--cooldown SECONDS` (default 2), `--no-warmup`,
-`--resume`, `--out PATH`, `--format txt|md|html`, `--summary`, `--no-report`.
+`--resume`, `--out PATH`, `--format txt|md|html|csv`, `--summary`, `--no-report`.
+
+A **`.csv` table is always written** next to the `.json`/`.txt` (no flag needed) — one row per
+(task, leg) with `category, task, engine, leg, bucket, reps, median_s, min_s, std_s, cv,
+peak_rss_mb, score, status, swapped, noisy`. pandas and Polars are distinct rows (engine in
+both the `task` suffix and the `engine` column); `score` is filled only when a baseline exists
+and the leg is scored. `cpubench report FILE --format csv` prints the same table to stdout.
 
 ---
 
@@ -208,7 +214,10 @@ Every run writes two files (default into `results/<run_id>.{json,txt}`):
   environment.
 - A **plain-text report** (§7.3): pure ASCII, ≤90 columns, deterministic ordering — built to
   paste into an issue/gist and `diff` cleanly. Each per-task row shows the **score next to its
-  timing** (median/min/cv) and peak RSS. `--format md|html` emits those too.
+  timing** (median/min/cv) and peak RSS. `--format md|html` emits those too. A per-(task, leg)
+  **`.csv` table** is always written alongside it for spreadsheets/scripts (see the run-flags
+  section). The live console table breaks pandas vs Polars onto their own rows with an
+  explicit `engine` column.
 
 ### Scores are deferred (raw-times mode)
 

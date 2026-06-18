@@ -12,7 +12,7 @@ from cpubench.threading_ctl import resolve_n_jobs
     "clustering",
     data=datasets.blobs,
     sizes={
-        "quick": {"n_samples": 100_000, "n_features": 20, "centers": 25, "k": 25},
+        "quick": {"n_samples": 60_000, "n_features": 20, "centers": 25, "k": 25},
         "normal": {"n_samples": 600_000, "n_features": 50, "centers": 100, "k": 100},
     },
 )
@@ -31,7 +31,7 @@ def cl_kmeans(params, ctx):
     "clustering",
     data=datasets.blobs,
     sizes={
-        "quick": {"n_samples": 300_000, "n_features": 20, "centers": 25, "k": 25},
+        "quick": {"n_samples": 100_000, "n_features": 20, "centers": 25, "k": 25},
         "normal": {"n_samples": 3_000_000, "n_features": 50, "centers": 100, "k": 100},
     },
 )
@@ -80,7 +80,7 @@ def cl_optics(params, ctx):
     "clustering",
     data=datasets.blobs,
     sizes={
-        "quick": {"n_samples": 50_000, "n_features": 10, "centers": 10, "comp": 10},
+        "quick": {"n_samples": 30_000, "n_features": 10, "centers": 10, "comp": 10},
         "normal": {"n_samples": 200_000, "n_features": 10, "centers": 30, "comp": 30},
     },
 )

@@ -298,9 +298,10 @@ def run_benchmark(args: argparse.Namespace) -> int:
     if not args.no_report:
         from cpubench import reporting
 
+        stem = os.path.splitext(out_path)[0]
         # Canonical artifact: the §7.3 plain-text report, always written to disk.
         report_text = reporting.render_txt(document, summary=args.summary)
-        report_path = os.path.splitext(out_path)[0] + ".txt"
+        report_path = stem + ".txt"
         with open(report_path, "w") as fh:
             fh.write(report_text)
         # Console: rich table (§7.2) for a full run; the txt summary for --summary.
@@ -309,9 +310,14 @@ def run_benchmark(args: argparse.Namespace) -> int:
         else:
             reporting.print_rich(document)
         print(f"Report: {report_path}")
+        # The CSV table always accompanies the txt report (machine-friendly companion).
+        csv_path = stem + ".csv"
+        with open(csv_path, "w") as fh:
+            fh.write(reporting.render_csv(document))
+        print(f"Report (csv): {csv_path}")
         if args.format in ("md", "html"):
             extra = reporting.render_alt(document, fmt=args.format)
-            alt_path = os.path.splitext(out_path)[0] + f".{args.format}"
+            alt_path = stem + f".{args.format}"
             with open(alt_path, "w") as fh:
                 fh.write(extra)
             print(f"Report ({args.format}): {alt_path}")
@@ -326,6 +332,8 @@ def rerender_report(path: str, *, fmt: str = "txt", summary: bool = False) -> in
 
     if fmt == "txt":
         print(reporting.render_txt(document, summary=summary))
+    elif fmt == "csv":
+        print(reporting.render_csv(document), end="")
     else:
         print(reporting.render_alt(document, fmt=fmt))
     return 0
