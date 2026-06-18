@@ -73,3 +73,25 @@ def cl_gmm(params, ctx):
         )
         model.fit(x)
     return {"converged": bool(model.converged_)}
+
+
+@task(
+    "cl_agglom",
+    "clustering",
+    data=datasets.blobs,
+    sizes={
+        # Ward agglomerative builds the full hierarchy: ~O(n^2) memory/time with no
+        # connectivity constraint, so n is kept small (normal sizes are first guesses).
+        "quick": {"n_samples": 2_000, "n_features": 10, "centers": 10, "k": 10},
+        "normal": {"n_samples": 20_000, "n_features": 10, "centers": 25, "k": 25},
+    },
+)
+def cl_agglom(params, ctx):
+    import numpy as np
+    from sklearn.cluster import AgglomerativeClustering
+
+    x = ctx.data
+    with ctx.timer():
+        model = AgglomerativeClustering(n_clusters=int(ctx.params["k"]), linkage="ward")
+        model.fit(x)
+    return {"n_clusters": int(model.n_clusters_), "largest": int(np.bincount(model.labels_).max())}
