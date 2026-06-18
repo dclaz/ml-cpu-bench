@@ -27,27 +27,6 @@ def cl_kmeans(params, ctx):
 
 
 @task(
-    "cl_mbkmeans",
-    "clustering",
-    data=datasets.blobs,
-    sizes={
-        "quick": {"n_samples": 100_000, "n_features": 20, "centers": 25, "k": 25},
-        "normal": {"n_samples": 3_000_000, "n_features": 50, "centers": 100, "k": 100},
-    },
-)
-def cl_mbkmeans(params, ctx):
-    from sklearn.cluster import MiniBatchKMeans
-
-    x = ctx.data
-    with ctx.timer():
-        model = MiniBatchKMeans(
-            n_clusters=int(ctx.params["k"]), batch_size=1024, n_init=3, random_state=1337
-        )
-        model.fit(x)
-    return {"inertia": float(model.inertia_)}
-
-
-@task(
     "cl_optics",
     "clustering",
     data=datasets.blobs,

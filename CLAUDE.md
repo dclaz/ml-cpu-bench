@@ -56,7 +56,7 @@ then `controller` collects → `scoring` → `reporting`.
 - **No reset between reps. The timed region is READ-ONLY.** Use non-mutating ops (`np.sort`
   not `arr.sort`; `df.sort_values` not in-place), no `overwrite_a/overwrite_b`, `copy_X=True`,
   `warm_start=False`. Restore *input only*, untimed, for inherently destructive ops.
-  **`dp_sort` must use a non-mutating sort** or reps 2+ time an already-sorted input.
+  **Sort/rank ops (e.g. `fe_rank`) must be non-mutating** or reps 2+ time an already-sorted input.
 
 **Threading (§2)**
 - One `--threads` value is honoured by ALL libs via env vars set **before any heavy import**
