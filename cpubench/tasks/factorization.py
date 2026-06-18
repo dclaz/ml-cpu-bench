@@ -6,7 +6,7 @@ from cpubench import datasets
 from cpubench.registry import task
 
 _DENSE_SIZES = {
-    "quick": {"n_samples": 20_000, "n_features": 500},
+    "quick": {"n_samples": 8_000, "n_features": 500},
     "normal": {"n_samples": 100_000, "n_features": 2_000},
 }
 
@@ -51,7 +51,7 @@ def mf_pca(params, ctx):
     data=datasets.dense_nonneg,
     backend_sensitive=True,
     sizes={
-        "quick": {"n_samples": 5_000, "n_features": 500},
+        "quick": {"n_samples": 800, "n_features": 250},
         "normal": {"n_samples": 20_000, "n_features": 2_000},
     },
 )

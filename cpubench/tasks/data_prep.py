@@ -14,7 +14,7 @@ from cpubench.registry import task
 
 ENGINES = ("pandas", "polars")
 _FE_SIZES = {
-    "quick": {"rows": 2_000_000, "entities": 2_000},
+    "quick": {"rows": 1_200_000, "entities": 2_000},
     "normal": {"rows": 10_000_000, "entities": 20_000},
 }
 
@@ -86,7 +86,7 @@ def dp_join(params, ctx):
     data=datasets.core_frame,
     engines=ENGINES,
     sizes={
-        "quick": {"rows": 2_000_000, "groups": 50_000},
+        "quick": {"rows": 500_000, "groups": 25_000},
         "normal": {"rows": 10_000_000, "groups": 200_000},
     },
 )
