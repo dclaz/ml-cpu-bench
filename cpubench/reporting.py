@@ -8,6 +8,9 @@ raw-times mode: the ``score`` column is dropped and the headline is omitted.
 
 from __future__ import annotations
 
+import csv
+import io
+
 from cpubench import CATEGORY_LABELS, CATEGORY_ORDER, registry
 
 WIDTH = 90
@@ -326,6 +329,98 @@ def render_alt(document: dict, *, fmt: str = "md") -> str:
     return txt
 
 
+def _bucket_of(r: dict) -> str | None:
+    """Scoring bucket for a result (mirrors scoring.bucket_of, kept dep-free here)."""
+    tm, cores = r.get("threads_mode"), r.get("cores")
+    if tm == "all" and cores == "all":
+        return "all_cores"
+    if tm == "single":
+        return "single_core"
+    if tm == "all" and cores == "p":
+        return "p_cores"
+    if tm == "all" and cores == "e":
+        return "e_cores"
+    return None
+
+
+# CSV columns — stable, machine-friendly. `task` carries the engine suffix (e.g.
+# ``dp_groupby[pandas]`` vs ``[polars]``); `engine` is also broken out for easy filtering.
+CSV_COLUMNS = [
+    "category",
+    "task",
+    "engine",
+    "leg",
+    "bucket",
+    "reps",
+    "median_s",
+    "min_s",
+    "std_s",
+    "cv",
+    "peak_rss_mb",
+    "score",
+    "status",
+    "swapped",
+    "noisy",
+]
+
+
+def render_csv(document: dict) -> str:
+    """Tabular CSV: one row per (task, leg) result.
+
+    `score` is the per-task score (reference_median / measured_median, >1 = faster than
+    reference) for the result's scoring bucket, or blank when no baseline exists or the leg
+    isn't scored (e.g. explicit ``--threads N``). pandas and Polars are distinct rows via the
+    engine-suffixed `task` name plus the `engine` column.
+    """
+    scores = document.get("scores", {})
+    order = {name: i for i, (_cat, name) in enumerate(_ordered_entries())}
+    leg_rank = {"all-cores": 0, "P-cores": 1, "E-cores": 2, "1-core": 3}
+
+    results = list(document.get("results", []))
+    results.sort(
+        key=lambda r: (order.get(r.get("task"), len(order)), leg_rank.get(_leg_tag(r), 9))
+    )
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(CSV_COLUMNS)
+    for r in results:
+        name = r.get("task")
+        bucket = _bucket_of(r)
+        score = None
+        if bucket is not None:
+            per_task = (scores.get(bucket, {}) or {}).get("per_task", {})
+            score = per_task.get(name)
+        ok = r.get("status") == "ok"
+        writer.writerow(
+            [
+                r.get("category"),
+                name,
+                r.get("engine") or "",
+                _leg_tag(r),
+                bucket or "",
+                len(r.get("reps_s", [])) if ok else "",
+                _csv_num(r.get("median_s")) if ok else "",
+                _csv_num(r.get("min_s")) if ok else "",
+                _csv_num(r.get("std_s")) if ok else "",
+                _csv_num(r.get("cv")) if ok else "",
+                _csv_num(r.get("peak_rss_mb")) if ok else "",
+                _csv_num(score),
+                r.get("status"),
+                bool(r.get("swapped")),
+                bool(r.get("noisy")),
+            ]
+        )
+    return out.getvalue()
+
+
+def _csv_num(x: float | None) -> str:
+    """Full-precision-ish numeric cell for CSV (blank for missing); trims trailing zeros."""
+    if x is None:
+        return ""
+    return f"{x:.6g}"
+
+
 def print_rich(document: dict, console=None) -> None:
     """Coloured console table (SPEC §7.2): per-task median/cv/RSS grouped by category.
 
@@ -362,13 +457,20 @@ def print_rich(document: dict, console=None) -> None:
         f"BLAS {env.get('blas_backend')}"
     )
 
+    # A dedicated engine column keeps pandas vs Polars distinct even when the narrow `task`
+    # column crops the ``[engine]`` suffix to fit the terminal.
+    has_engines = any(r.get("engine") for r in results.values())
+
     table = Table(show_lines=False, header_style="bold")
-    table.add_column("task")
+    table.add_column("task", no_wrap=True)
+    if has_engines:
+        table.add_column("engine")
     if scored:
         table.add_column("score", justify="right")
     table.add_column("median(s)", justify="right")
     table.add_column("cv", justify="right")
     table.add_column("RSS(MB)", justify="right")
+    span = len(table.columns)
 
     last_cat = None
     for cat, name in _ordered_entries():
@@ -376,16 +478,22 @@ def print_rich(document: dict, console=None) -> None:
         if r is None:
             continue
         if cat != last_cat:
-            span = 5 if scored else 4
             table.add_row(*([f"[bold cyan]{CATEGORY_LABELS[cat]}[/]"] + [""] * (span - 1)))
             last_cat = cat
+        # With an engine column, drop the redundant ``[engine]`` suffix from the task name.
+        disp = r.get("base_task") if has_engines and r.get("base_task") else name
         if r.get("status") != "ok":
-            cells = [f"[dim]{name}[/]", "[red]FAILED[/]"]
-            cells += [""] * ((5 if scored else 4) - len(cells))
+            cells = [f"[dim]{disp}[/]"]
+            if has_engines:
+                cells.append(f"[dim]{r.get('engine') or ''}[/]")
+            cells.append("[red]FAILED[/]")
+            cells += [""] * (span - len(cells))
             table.add_row(*cells)
             continue
         style = "yellow" if r.get("noisy") else None
-        row = [f"  {name}"]
+        row = [f"  {disp}"]
+        if has_engines:
+            row.append(r.get("engine") or "")
         if scored:
             row.append(_2dp(per_task.get(name)))
         row += [_sig3(r.get("median_s")), _2dp(r.get("cv")), _sig3(r.get("peak_rss_mb"))]

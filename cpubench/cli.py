@@ -25,7 +25,7 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-warmup", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--out", default=None)
-    p.add_argument("--format", choices=["txt", "md", "html"], default="txt")
+    p.add_argument("--format", choices=["txt", "md", "html", "csv"], default="txt")
     p.add_argument("--summary", action="store_true")
     p.add_argument("--no-report", action="store_true")
 
@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_report = sub.add_parser("report", help="(re)render a report from a results JSON")
     p_report.add_argument("file")
-    p_report.add_argument("--format", choices=["txt", "md", "html"], default="txt")
+    p_report.add_argument("--format", choices=["txt", "md", "html", "csv"], default="txt")
     p_report.add_argument("--summary", action="store_true")
 
     p_cmp = sub.add_parser("compare", help="diff two runs")
