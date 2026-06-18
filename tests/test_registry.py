@@ -21,7 +21,7 @@ def test_registry_in_category_order():
 def test_long_runners_excluded_from_quick():
     registry.load_all_tasks()
     quick_names = {s.name for s in registry.get_registry() if "quick" in s.modes}
-    for name in ("md_gpr", "md_lgbm_multi", "nlp_lda", "sp_lasso_cv"):
+    for name in ("md_gpr", "nlp_lda", "sp_lasso_cv"):
         assert name not in quick_names
 
 

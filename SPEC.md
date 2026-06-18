@@ -201,8 +201,9 @@ contamination.
   naturally independent and must not accumulate memory across iterations. Where an operation is
   inherently destructive (an unavoidable in-place op, or a solver that overwrites its matrix),
   only the **input** is restored, **outside** the timed region, between reps — a minimal data
-  restore, never a warm-state reset. (Concrete trap: `dp_sort` must use a non-mutating sort, or
-  reps 2+ would time an already-sorted input, which adaptive sorts finish far faster.)
+  restore, never a warm-state reset. (Concrete trap: a sort/rank op — e.g. `fe_rank` — must be
+  non-mutating (`df.sort_values`/`np.sort`, not in-place), or reps 2+ would time an already-sorted
+  input, which adaptive sorts finish far faster.)
 - **Reported per config:** median, min, std, coefficient of variation (CV), all raw reps,
   peak RSS (MB), CPU-time/wall ratio. CV above 0.10 sets a `noisy` flag.
 - **Inter-task buffer** (`--cooldown SECONDS`, default 2) between tasks: a settling gap for
@@ -264,7 +265,7 @@ A single `--mode` selects both which tasks run and how big. Two modes:
 
 | Mode | Tasks | Sizes | Typical use |
 |---|---|---|---|
-| `quick` | fast subset (excludes the long-runners tagged "normal only" in §5: `md_gpr`, `md_lgbm_multi`, `nlp_lda`, `sp_lasso_cv`) | `quick` column | CI / sanity |
+| `quick` | fast subset (excludes the long-runners tagged "normal only" in §5: `md_gpr`, `nlp_lda`, `sp_lasso_cv`) | `quick` column | CI / sanity |
 | `normal` *(default)* | every task | `normal` column | the real benchmark |
 
 Both modes now cover the **same 6 categories** (data-prep, linalg, factorization, clustering,
@@ -300,27 +301,25 @@ performance is out of scope.
 
 | Task | Operation | Key sizes — quick → normal (rows unless noted) |
 |---|---|---|
-| `dp_groupby` | group by categorical, agg sum/mean/std/count on 4 cols | 2M (1k groups) → 10M (50k groups) |
-| `dp_join` | inner join two frames on key | 0.5M⋈0.5M → 8M⋈2M |
-| `dp_sort` | multi-key sort (2 columns) | 2M → 10M |
-| `dp_filter` | boolean mask + column select | 2M → 10M |
-| `dp_string` | regex extract + lower + contains on string col | 1M → 6M |
-| `dp_rolling` | **global** rolling (whole frame, sorted by datetime): mean, std, median, window=100 | 1M → 6M |
+| `dp_groupby` | group by categorical, agg sum/mean/std/count on 4 cols | 2M (1k groups) → 26M (130k groups) |
+| `dp_join` | inner join two frames on key | 0.5M⋈0.5M → 80M⋈20M |
+| `dp_filter` | boolean mask + column select | 2M → 22M |
+| `dp_string` | regex extract + lower + contains on string col | 1M → 48M |
+| `dp_rolling` | **global** rolling (whole frame, sorted by datetime): mean, std, median, window=100 | 1M → 26M |
 
 **(B) Feature engineering — leakage-safe time-series panel features.** A synthetic panel frame
 is generated and sorted by `(entity_id, timestamp)` **untimed** before the timed region. Schema:
 `entity_id` (int64), `timestamp` (datetime64[ns]), `target` (float64), 20 numeric features
 (float64), 3 categorical features (low/med/high cardinality). All FE tasks share the same panel
-size per mode: **quick 2M rows / 2k entities → normal 10M rows / 20k entities** (bounded well
-below the proposal's 50M to stay within the RSS target — grouped rolling in pandas is the memory
-and time driver). Every window/expanding/encoding computation uses **only prior observations**
+size per mode: **quick 2M rows / 2k entities → normal 12M rows / 24k entities** (the normal panel
+is capped by `fe_onehot`'s `get_dummies` footprint — the fattest FE consumer — which sits near the
+~10.5 GB RSS cap at 12M rows). Every window/expanding/encoding computation uses **only prior observations**
 (`closed="left"` semantics): no row may use its own value or any future row.
 
 | Task | Operation (per entity unless noted) | Distinct pattern it stresses |
 |---|---|---|
 | `fe_lags` | grouped lags: `lag_1`, `lag_7`, `lag_30` (grouped `shift`) | grouped gather / shift |
 | `fe_rolling` | grouped **leakage-safe** rolling: mean (7/30/90) + std (30), `closed="left"` | grouped window functions (heaviest) |
-| `fe_expanding` | grouped expanding mean + historical group normalization (`value ÷ mean of prior obs`) | grouped cumulative / expanding |
 | `fe_ewm` | grouped exponentially weighted moving average | recursive (non-windowed) accumulation |
 | `fe_onehot` | one-hot / dummy encoding of the low- and medium-cardinality categoricals (`pd.get_dummies` / Polars `to_dummies`), output `uint8` | dense column expansion (memory-bound) |
 | `fe_rank` | **cross-sectional** rank + z-score per `timestamp` (group by time across entities) | many-small-groups rank (different group axis) |
@@ -362,8 +361,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 
 | Task | Op | Sizes (n_samples × n_features), components — quick → normal |
 |---|---|---|
-| `mf_tsvd` | `TruncatedSVD` | 20k×500 → 100k×2000, k=50 |
-| `mf_pca` | `PCA` (full) | same shapes, k=50 |
+| `mf_pca` | `PCA` | 8k×500 → 100k×2000, k=50 |
 | `mf_nmf` | `NMF` (nndsvda, max_iter 200) | 5k×500 → 20k×2000, k=20 |
 
 ### 5.4 Clustering — scikit-learn
@@ -371,7 +369,6 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 | Task | Op | Sizes — quick → normal |
 |---|---|---|
 | `cl_kmeans` | `KMeans` (n_init=3, max_iter=100) | 100k×20, k=25 → 600k×50, k=100 |
-| `cl_mbkmeans` | `MiniBatchKMeans` (batch 1024) | 300k, k=25 → 3M, k=100 |
 | `cl_optics` | `OPTICS` (min_samples=10, ball_tree, bounded `max_eps`, `n_jobs` honoured) | 10k → 30k × 10 *(O(n²)-bounded)* |
 | `cl_gmm` | `GaussianMixture` (full cov) | 50k×10, comp 10 → 200k×10, comp 30 |
 
@@ -393,9 +390,7 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 | `md_gpr` | `GaussianProcessRegressor` (RBF kernel, `optimizer=None`, 1000 predict pts) *(O(n³) kernel Cholesky — backend-sensitive; `normal` only)* | n_train 2k×20 → 10k×20 |
 | `md_rf` | `RandomForestClassifier` | 100k×50, 100 trees → 200k×50, 300 trees |
 | `md_rf_predict` | `RandomForestClassifier.predict` — forest **trained untimed** on 200k×50 / 300 trees; timed region scores a large `X_test` (`n_jobs` honoured over trees) | predict rows 500k×50 → 5M×50 |
-| `md_hist_gbm` | `HistGradientBoostingClassifier` | 200k×50, 100 iters → 1M×100, 300 iters |
 | `md_lgbm` | LightGBM, **regression** (`num_threads` honoured) | 200k×50, 100 trees → 500k×100, 500 trees |
-| `md_lgbm_multi` | LightGBM, **multiclass softmax, `num_class=10`** *(builds num_class × rounds trees; `normal` only)* | 200k×50, 250 rounds *(normal only)* |
 | `md_svc_rbf` | `SVC` RBF *(single-threaded dominator — kept small)* | 5k×30 → 15k×30 |
 | `md_knn` | `KNeighborsClassifier` brute, 1000 queries | 50k×50 → 200k×50 |
 | `md_autoarima` | statsforecast `AutoARIMA` (nonseasonal, `season_length=1`) fit across a panel of independent series with 1 exogenous regressor (relevant for ~half, noise for the rest), forecasting `horizon` steps; parallel over series via `n_jobs`. *(numba-JIT — warm-up absorbs first-call compile)* | 8 series × 96 pts, h=1 → 1024 series × 1024 pts, h=24 |
@@ -418,13 +413,6 @@ and time driver). Every window/expanding/encoding computation uses **only prior 
 > Cholesky, `md_gpr` is tagged backend-sensitive for `compare` even though it lives in the
 > models category** (see §6). Checksum is the rounded log-marginal-likelihood.
 
-> `md_lgbm_multi` data is 10 Gaussian class blobs (centroids drawn via
-> `default_rng`, then sampled around them) so the classes are learnable and stable across
-> library versions. At `num_class=10` × 250 rounds it builds ~2,500 trees (more than the
-> binary/regression task); it is excluded from `quick`. Its
-> correctness checksum is a tolerant invariant (final multiclass log-loss rounded), since
-> LightGBM is non-deterministic across thread counts.
-
 ### 5.6 Sparse & NLP workloads — SciPy sparse + scikit-learn
 Exercises the sparse code paths that classical ML and text work actually hit — memory-bound,
 irregular access, and largely independent of the dense BLAS backend (so these land in the
@@ -435,7 +423,6 @@ for the text tasks — all seeded for stability. No new dependencies.
 | Task | Op | Sizes (n_samples × n_features), density — quick → normal |
 |---|---|---|
 | `sp_tfidf` | `TfidfVectorizer.fit_transform` on a synthetic Zipfian token corpus | 50k docs → 300k docs; vocab 30k; ~80 tokens/doc |
-| `sp_hashvec` | `HashingVectorizer.transform` (n_features=2²⁰) on the Zipfian token corpus | 50k docs → 300k docs; ~80 tokens/doc |
 | `sp_fhash` | `FeatureHasher` (input_type='string', n_features=2²⁰) on high-cardinality categorical rows | 200k×20 fields → 1M×30 fields; cardinality ~1e6/field |
 | `sp_matmul` | sparse CSR × dense product (SpMM primitive) | 100k×30k → 200k×50k @ 0.2%, dense rhs × 64 |
 | `sp_tsvd` | `TruncatedSVD` (randomized) on sparse CSR (LSA use case) | 50k×10k → 200k×50k @ 0.3%, k=100 |
@@ -448,13 +435,12 @@ for the text tasks — all seeded for stability. No new dependencies.
 > genuinely different code path from the dense `mf_nmf` — sparse multiplicative/coordinate
 > updates rather than dense BLAS — so the two don't duplicate each other.
 
-> `sp_hashvec` and `sp_fhash` both exercise the hashing-trick path: a
-> stateless `transform` (no `fit`, no vocabulary), deterministic (MurmurHash), and
-> **single-threaded** in scikit-learn — so, like `md_svc_rbf`, they measure raw per-core
-> hashing throughput even inside an all-cores run. The vectorizer hashes a token stream; the
+> `sp_fhash` exercises the hashing-trick path: a stateless `transform` (no `fit`, no
+> vocabulary), deterministic (MurmurHash), and **single-threaded** in scikit-learn — so, like
+> `md_svc_rbf`, it measures raw per-core hashing throughput even inside an all-cores run. The
 > feature hasher hashes `"field=value"` strings, the realistic way high-cardinality categorical
 > data is encoded into a fixed sparse space without building a category dictionary. Because the
-> transform is deterministic, their checksums are **exact** (output shape + nnz), not tolerant.
+> transform is deterministic, its checksum is **exact** (output shape + nnz), not tolerant.
 >
 > **`sp_fhash` sizing caveat.** Its input is an iterable of per-row feature lists;
 > keeping data generation untimed means materializing that input, which for high-cardinality
@@ -936,12 +922,11 @@ Resolved:
 - **Config source of truth:** the **registry**; no `configs/*.yaml` files.
 - **Non-standard `--threads N`** (neither 1 nor physical-all): produces raw times + intra-run
   ratios only, no scored bucket, labelled as such in the report.
-- **`md_lgbm_multi`:** `num_class=10`, 250 rounds, `normal` only.
 - **Feature engineering:** folded into the `data_prep` category (still **6 categories**), not a
   standalone 7th — avoids one workload family carrying outsized headline weight. Added as
-  distinct FE tasks (`fe_lags`, `fe_rolling`, `fe_expanding`, `fe_ewm`, `fe_onehot`,
-  `fe_rank`, `fe_datetime`) rather than one end-to-end pipeline. Panel `normal` bounded to 10M
-  rows / 20k entities.
+  distinct FE tasks (`fe_lags`, `fe_rolling`, `fe_ewm`, `fe_onehot`,
+  `fe_rank`, `fe_datetime`) rather than one end-to-end pipeline. Panel `normal` capped at 12M
+  rows / 24k entities by `fe_onehot`'s RSS.
 - **RF inference:** added `md_rf_predict` to `models` (train untimed, predict timed).
 - **Reporting:** category scores are a first-class block shown beneath the headline.
 - **Versioning:** these additions bump `benchmark_version` to **1.1.0**; `compare` will refuse

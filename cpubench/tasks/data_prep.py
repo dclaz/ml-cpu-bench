@@ -15,7 +15,9 @@ from cpubench.registry import task
 ENGINES = ("pandas", "polars")
 _FE_SIZES = {
     "quick": {"rows": 1_200_000, "entities": 2_000},
-    "normal": {"rows": 10_000_000, "entities": 20_000},
+    # normal panel is capped by fe_onehot's get_dummies footprint (the fattest FE consumer);
+    # ~12M rows puts its peak RSS near ~9.3 GB, under the ~10.5 GB cap. See tuning notes.
+    "normal": {"rows": 12_000_000, "entities": 24_000},
 }
 
 
@@ -34,7 +36,7 @@ def _shape(obj) -> dict:
     engines=ENGINES,
     sizes={
         "quick": {"rows": 2_000_000, "groups": 1_000},
-        "normal": {"rows": 10_000_000, "groups": 50_000},
+        "normal": {"rows": 26_000_000, "groups": 130_000},
     },
 )
 def dp_groupby(params, ctx):
@@ -66,7 +68,7 @@ def dp_groupby(params, ctx):
     engines=ENGINES,
     sizes={
         "quick": {"left": 500_000, "right": 500_000},
-        "normal": {"left": 8_000_000, "right": 2_000_000},
+        "normal": {"left": 80_000_000, "right": 20_000_000},
     },
 )
 def dp_join(params, ctx):
@@ -81,35 +83,13 @@ def dp_join(params, ctx):
 
 
 @task(
-    "dp_sort",
-    "data_prep",
-    data=datasets.core_frame,
-    engines=ENGINES,
-    sizes={
-        "quick": {"rows": 500_000, "groups": 25_000},
-        "normal": {"rows": 10_000_000, "groups": 200_000},
-    },
-)
-def dp_sort(params, ctx):
-    df = ctx.data
-    keys = ["cat_high", "num_0"]
-    if ctx.engine == "pandas":
-        with ctx.timer():  # sort_values returns a new frame (non-mutating)
-            out = df.sort_values(keys)
-        return _shape(out)
-    with ctx.timer():
-        out = df.sort(keys)
-    return _shape(out)
-
-
-@task(
     "dp_filter",
     "data_prep",
     data=datasets.core_frame,
     engines=ENGINES,
     sizes={
         "quick": {"rows": 2_000_000, "groups": 1_000},
-        "normal": {"rows": 10_000_000, "groups": 50_000},
+        "normal": {"rows": 22_000_000, "groups": 110_000},
     },
 )
 def dp_filter(params, ctx):
@@ -130,7 +110,7 @@ def dp_filter(params, ctx):
     "data_prep",
     data=datasets.string_frame,
     engines=ENGINES,
-    sizes={"quick": {"rows": 1_000_000}, "normal": {"rows": 6_000_000}},
+    sizes={"quick": {"rows": 1_000_000}, "normal": {"rows": 48_000_000}},
 )
 def dp_string(params, ctx):
     df = ctx.data
@@ -158,7 +138,7 @@ def dp_string(params, ctx):
     engines=ENGINES,
     sizes={
         "quick": {"rows": 1_000_000, "groups": 1_000},
-        "normal": {"rows": 6_000_000, "groups": 50_000},
+        "normal": {"rows": 26_000_000, "groups": 220_000},
     },
 )
 def dp_rolling(params, ctx):
@@ -239,36 +219,6 @@ def fe_rolling(params, ctx):
             .over("entity_id")
             .alias("m90"),
             pl.col("target").shift(1).rolling_std(30, min_samples=1).over("entity_id").alias("s30"),
-        )
-    return _shape(out)
-
-
-@task("fe_expanding", "data_prep", data=datasets.panel_frame, engines=ENGINES, sizes=_FE_SIZES)
-def fe_expanding(params, ctx):
-    df = ctx.data
-    if ctx.engine == "pandas":
-        import pandas as pd
-
-        gid = df["entity_id"]
-        with ctx.timer():
-            # Vectorized leakage-safe expanding mean of prior obs (matches the Polars
-            # cum_sum / cum_count form): prior_mean[k] = mean(target[0..k-1]) per entity.
-            shifted = df.groupby("entity_id")["target"].shift(1)
-            csum = shifted.groupby(gid).cumsum()
-            cnt = shifted.notna().groupby(gid).cumsum()
-            prior_mean = csum / cnt.where(cnt > 0)
-            norm = df["target"] / prior_mean.replace(0.0, np.nan)
-            out = pd.DataFrame({"prior_mean": prior_mean, "norm": norm})
-        return _shape(out)
-    import polars as pl
-
-    with ctx.timer():
-        prior = pl.col("target").shift(1).cum_sum().over("entity_id") / pl.col("target").shift(
-            1
-        ).cum_count().over("entity_id")
-        out = df.select(
-            prior.alias("prior_mean"),
-            (pl.col("target") / prior).alias("norm"),
         )
     return _shape(out)
 

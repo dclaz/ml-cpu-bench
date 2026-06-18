@@ -12,23 +12,6 @@ _DENSE_SIZES = {
 
 
 @task(
-    "mf_tsvd",
-    "factorization",
-    data=datasets.dense_matrix,
-    backend_sensitive=True,
-    sizes=_DENSE_SIZES,
-)
-def mf_tsvd(params, ctx):
-    from sklearn.decomposition import TruncatedSVD
-
-    x = ctx.data
-    with ctx.timer():
-        model = TruncatedSVD(n_components=50, random_state=ctx.params.get("seed", 1337))
-        out = model.fit_transform(x)
-    return {"shape": f"{out.shape[0]}x{out.shape[1]}"}
-
-
-@task(
     "mf_pca",
     "factorization",
     data=datasets.dense_matrix,

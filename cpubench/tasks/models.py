@@ -145,26 +145,6 @@ def md_rf_predict(params, ctx):
 
 
 @task(
-    "md_hist_gbm",
-    "models",
-    data=datasets.classification_xy,
-    sizes={
-        "quick": {"n_samples": 9_000, "n_features": 50, "n_classes": 3, "iters": 20},
-        "normal": {"n_samples": 1_000_000, "n_features": 100, "n_classes": 3, "iters": 300},
-    },
-)
-def md_hist_gbm(params, ctx):
-    from sklearn.ensemble import HistGradientBoostingClassifier
-
-    x, y = ctx.data
-    with ctx.timer():
-        HistGradientBoostingClassifier(max_iter=int(ctx.params["iters"]), random_state=1337).fit(
-            x, y
-        )
-    return {"iters": int(ctx.params["iters"])}
-
-
-@task(
     "md_lgbm",
     "models",
     data=datasets.regression_xy,
@@ -185,29 +165,6 @@ def md_lgbm(params, ctx):
             verbose=-1,
         ).fit(x, y)
     return {"trees": int(ctx.params["trees"])}
-
-
-@task(
-    "md_lgbm_multi",
-    "models",
-    data=datasets.classification_xy,
-    modes=("normal",),
-    sizes={"normal": {"n_samples": 200_000, "n_features": 50, "n_classes": 10, "rounds": 250}},
-)
-def md_lgbm_multi(params, ctx):
-    import lightgbm as lgb
-
-    x, y = ctx.data
-    with ctx.timer():
-        lgb.LGBMClassifier(
-            objective="multiclass",
-            num_class=10,
-            n_estimators=int(ctx.params["rounds"]),
-            num_threads=resolve_num_threads(ctx.threads),
-            random_state=1337,
-            verbose=-1,
-        ).fit(x, y)
-    return {"rounds": int(ctx.params["rounds"])}
 
 
 @task(

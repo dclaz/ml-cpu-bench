@@ -30,25 +30,6 @@ def sp_tfidf(params, ctx):
 
 
 @task(
-    "sp_hashvec",
-    "sparse",
-    data=datasets.token_corpus,
-    sizes={
-        "quick": {"n_docs": 20_000, "vocab": 30_000, "tokens_per_doc": 80},
-        "normal": {"n_docs": 300_000, "vocab": 30_000, "tokens_per_doc": 80},
-    },
-)
-def sp_hashvec(params, ctx):
-    from sklearn.feature_extraction.text import HashingVectorizer
-
-    docs = ctx.data
-    vec = HashingVectorizer(n_features=2**20)
-    with ctx.timer():
-        out = vec.transform(docs)
-    return {"shape": f"{out.shape[0]}x{out.shape[1]}", "nnz": int(out.nnz)}
-
-
-@task(
     "sp_fhash",
     "sparse",
     data=datasets.fhash_rows,
