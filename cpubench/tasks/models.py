@@ -190,8 +190,8 @@ def md_svc_rbf(params, ctx):
     "models",
     data=datasets.arima_panel,
     sizes={
-        "quick": {"n_series": 8, "series_len": 96, "horizon": 1},
-        "normal": {"n_series": 1024, "series_len": 1024, "horizon": 24},
+        "quick": {"n_series": 4, "series_len": 96, "horizon": 1},
+        "normal": {"n_series": 256, "series_len": 512, "horizon": 12},
     },
 )
 def md_autoarima(params, ctx):

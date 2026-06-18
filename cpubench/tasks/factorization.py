@@ -34,7 +34,7 @@ def mf_pca(params, ctx):
     data=datasets.dense_nonneg,
     backend_sensitive=True,
     sizes={
-        "quick": {"n_samples": 800, "n_features": 250},
+        "quick": {"n_samples": 1000, "n_features": 50},
         "normal": {"n_samples": 20_000, "n_features": 2_000},
     },
 )
