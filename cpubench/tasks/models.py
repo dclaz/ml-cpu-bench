@@ -229,6 +229,34 @@ def md_svc_rbf(params, ctx):
 
 
 @task(
+    "md_autoarima",
+    "models",
+    data=datasets.arima_panel,
+    sizes={
+        "quick": {"n_series": 8, "series_len": 96, "horizon": 1},
+        "normal": {"n_series": 1024, "series_len": 1024, "horizon": 24},
+    },
+)
+def md_autoarima(params, ctx):
+    from statsforecast import StatsForecast
+    from statsforecast.models import AutoARIMA
+
+    train_df, future_df = ctx.data
+    horizon = int(ctx.params["horizon"])
+    with ctx.timer():
+        sf = StatsForecast(
+            models=[AutoARIMA(season_length=1)],
+            freq=1,
+            n_jobs=resolve_n_jobs(ctx.threads),
+        )
+        fc = sf.forecast(df=train_df, h=horizon, X_df=future_df)
+    return {
+        "n_series": int(ctx.params["n_series"]),
+        "forecast_sum": round(float(fc["AutoARIMA"].fillna(0.0).sum()), 3),
+    }
+
+
+@task(
     "md_knn",
     "models",
     data=datasets.classification_xy,

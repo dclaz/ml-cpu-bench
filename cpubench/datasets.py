@@ -213,6 +213,90 @@ def rf_predict_data(params, rng, engine=None):
     return x_tr, y_tr, x_te
 
 
+# --------------------------------------------------------------------------- time series
+_ARIMA_KINDS = ("white", "ar1", "ar2", "rw", "trend", "seasonal")
+_ARIMA_SEASONS = (7, 12, 24)
+
+
+def _ar_recurse(eps: np.ndarray, phis) -> np.ndarray:
+    """Generate an AR(p) series from innovations ``eps`` and coefficients ``phis``."""
+    out = np.empty_like(eps)
+    p = len(phis)
+    for t in range(eps.shape[0]):
+        val = eps[t]
+        for j in range(p):
+            if t - j - 1 >= 0:
+                val += phis[j] * out[t - j - 1]
+        out[t] = val
+    return out
+
+
+def arima_panel(params, rng, engine=None):
+    """Long-format panel of independent univariate series for AutoARIMA forecasting.
+
+    ``n_series`` series, each with ``series_len`` history points plus a ``horizon`` of
+    future exogenous values. Series vary in kind (white noise, stationary AR(1)/AR(2),
+    random walk, trend, seasonal sinusoid) so the panel spans seasonality, autocorrelation
+    and (non)stationarity. One exogenous regressor ``ex_1`` is relevant (nonzero beta) for
+    ~half the series and pure noise for the rest. Built untimed; statsforecast consumes the
+    returned ``(train_df, future_df)`` pandas frames directly.
+    """
+    import pandas as pd
+
+    n_series = int(params["n_series"])
+    series_len = int(params["series_len"])
+    horizon = int(params["horizon"])
+    total = series_len + horizon
+
+    kinds = rng.integers(0, len(_ARIMA_KINDS), size=n_series, dtype=np.int64)
+    relevant = rng.integers(0, 2, size=n_series, dtype=np.int64).astype(bool)
+    ex_full = rng.standard_normal((n_series, total)).astype(np.float64)
+    steps = np.arange(total, dtype=np.float64)
+
+    y_hist = np.empty((n_series, series_len), dtype=np.float64)
+    for i in range(n_series):  # untimed per-series build; loop of n_series is fine
+        kind = _ARIMA_KINDS[kinds[i]]
+        eps = rng.standard_normal(total).astype(np.float64)
+        if kind == "white":
+            s = eps
+        elif kind == "ar1":
+            s = _ar_recurse(eps, (0.3 + 0.6 * rng.random(),))  # stationary AR(1)
+        elif kind == "ar2":
+            s = _ar_recurse(eps, (0.5, -0.3))  # stationary AR(2)
+        elif kind == "rw":
+            s = np.cumsum(eps)  # unit root / nonstationary
+        elif kind == "trend":
+            s = (rng.random() - 0.5) * 0.1 * steps + eps
+        else:  # seasonal
+            m = int(_ARIMA_SEASONS[rng.integers(0, len(_ARIMA_SEASONS))])
+            s = (1.0 + 2.0 * rng.random()) * np.sin(2.0 * np.pi * steps / m) + eps
+        if relevant[i]:
+            s = s + (0.5 + rng.random()) * ex_full[i]
+        y_hist[i] = s[:series_len]
+
+    uid_hist = np.repeat(np.arange(n_series, dtype=np.int64), series_len)
+    ds_hist = np.tile(np.arange(series_len, dtype=np.int64), n_series)
+    train_df = pd.DataFrame(
+        {
+            "unique_id": uid_hist,
+            "ds": ds_hist,
+            "y": y_hist.reshape(-1),
+            "ex_1": ex_full[:, :series_len].reshape(-1),
+        }
+    )
+
+    uid_fut = np.repeat(np.arange(n_series, dtype=np.int64), horizon)
+    ds_fut = np.tile(np.arange(series_len, total, dtype=np.int64), n_series)
+    future_df = pd.DataFrame(
+        {
+            "unique_id": uid_fut,
+            "ds": ds_fut,
+            "ex_1": ex_full[:, series_len:].reshape(-1),
+        }
+    )
+    return train_df, future_df
+
+
 # --------------------------------------------------------------------------- sparse
 def sparse_csr(params, rng, engine=None):
     from scipy import sparse
