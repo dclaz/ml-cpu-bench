@@ -70,7 +70,7 @@ def sp_matmul(params, ctx):
     data=datasets.sparse_csr,
     sizes={
         "quick": {"n_samples": 6_000, "n_features": 4_000, "density": 0.003},
-        "normal": {"n_samples": 200_000, "n_features": 50_000, "density": 0.003},
+        "normal": {"n_samples": 80_000, "n_features": 50_000, "density": 0.003},
     },
 )
 def sp_tsvd(params, ctx):
@@ -90,7 +90,7 @@ def sp_tsvd(params, ctx):
     data=datasets.doc_term_tfidf,
     sizes={
         "quick": {"n_samples": 3_000, "n_features": 4_000, "density": 0.004},
-        "normal": {"n_samples": 100_000, "n_features": 30_000, "density": 0.004},
+        "normal": {"n_samples": 45_000, "n_features": 30_000, "density": 0.004},
     },
 )
 def sp_nmf(params, ctx):
@@ -125,7 +125,7 @@ def sp_saga(params, ctx):
     "sparse",
     data=datasets.doc_term_counts,
     modes=("normal",),
-    sizes={"normal": {"n_samples": 100_000, "n_features": 30_000, "density": 0.004}},
+    sizes={"normal": {"n_samples": 25_000, "n_features": 30_000, "density": 0.004}},
 )
 def nlp_lda(params, ctx):
     from sklearn.decomposition import LatentDirichletAllocation
@@ -147,7 +147,7 @@ def nlp_lda(params, ctx):
     "sparse",
     data=datasets.sparse_regression,
     modes=("normal",),
-    sizes={"normal": {"n_samples": 100_000, "n_features": 10_000, "density": 0.005}},
+    sizes={"normal": {"n_samples": 40_000, "n_features": 10_000, "density": 0.005}},
 )
 def sp_lasso_cv(params, ctx):
     from sklearn.linear_model import LassoCV

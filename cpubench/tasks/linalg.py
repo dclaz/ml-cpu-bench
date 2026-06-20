@@ -17,7 +17,7 @@ from cpubench.registry import task
     "linalg",
     data=datasets.gemm_pair,
     backend_sensitive=True,
-    sizes={"quick": {"N": 2000}, "normal": {"N": 8000}},
+    sizes={"quick": {"N": 2000}, "normal": {"N": 15000}},
 )
 def la_gemm(params, ctx):
     a, b = ctx.data
@@ -31,7 +31,7 @@ def la_gemm(params, ctx):
     "linalg",
     data=datasets.solve_system,
     backend_sensitive=True,
-    sizes={"quick": {"N": 2000}, "normal": {"N": 6000}},
+    sizes={"quick": {"N": 2000}, "normal": {"N": 15000}},
 )
 def la_solve(params, ctx):
     import scipy.linalg as sla
@@ -47,7 +47,7 @@ def la_solve(params, ctx):
     "linalg",
     data=datasets.spd_matrix,
     backend_sensitive=True,
-    sizes={"quick": {"N": 2000}, "normal": {"N": 6000}},
+    sizes={"quick": {"N": 2000}, "normal": {"N": 18000}},
 )
 def la_cholesky(params, ctx):
     import scipy.linalg as sla
@@ -63,7 +63,7 @@ def la_cholesky(params, ctx):
     "linalg",
     data=datasets.rect_matrix,
     backend_sensitive=True,
-    sizes={"quick": {"rows": 2000, "cols": 1000}, "normal": {"rows": 10000, "cols": 4000}},
+    sizes={"quick": {"rows": 2000, "cols": 1000}, "normal": {"rows": 18000, "cols": 6000}},
 )
 def la_qr(params, ctx):
     import scipy.linalg as sla
@@ -79,7 +79,7 @@ def la_qr(params, ctx):
     "linalg",
     data=datasets.rect_matrix,
     backend_sensitive=True,
-    sizes={"quick": {"rows": 2000, "cols": 1000}, "normal": {"rows": 6000, "cols": 3000}},
+    sizes={"quick": {"rows": 2000, "cols": 1000}, "normal": {"rows": 12000, "cols": 4500}},
 )
 def la_svd(params, ctx):
     a = ctx.data
@@ -93,7 +93,7 @@ def la_svd(params, ctx):
     "linalg",
     data=datasets.spd_matrix,
     backend_sensitive=True,
-    sizes={"quick": {"N": 1500}, "normal": {"N": 4500}},
+    sizes={"quick": {"N": 1500}, "normal": {"N": 8000}},
 )
 def la_eigh(params, ctx):
     a = ctx.data
@@ -107,7 +107,7 @@ def la_eigh(params, ctx):
     "linalg",
     data=datasets.fft_signal,
     backend_sensitive=True,
-    sizes={"quick": {"length": 2**22}, "normal": {"length": 2**25}},
+    sizes={"quick": {"length": 2**22}, "normal": {"length": 2**27}},
 )
 def la_fft(params, ctx):
     import scipy.fft
