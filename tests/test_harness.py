@@ -231,10 +231,29 @@ def test_stderr_reason_nonzero_uses_last_line():
     assert "exited 1" in reason and "ValueError: bad input" in reason
 
 
+def test_stderr_reason_macos_lightgbm_hint(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    stderr = (
+        "Traceback ...\n"
+        "ImportError: dlopen(...): Library not loaded: @rpath/libomp.dylib\n"
+        "Referenced from: .../lightgbm/lib_lightgbm.dylib\n"
+    )
+    reason = controller._stderr_reason(1, stderr)
+    assert "exited 1" in reason
+    assert "brew install libomp" in reason
+
+
 def test_failed_entry_carries_reason():
     cfg = registry.RunConfig(
-        task="la_gemm", category="linalg", engine=None, mode="quick", params={"N": 1},
-        threads=4, threads_mode="all", cores="all", backend_sensitive=True,
+        task="la_gemm",
+        category="linalg",
+        engine=None,
+        mode="quick",
+        params={"N": 1},
+        threads=4,
+        threads_mode="all",
+        cores="all",
+        backend_sensitive=True,
     )
     entry = controller._failed_entry(cfg, "worker killed by signal 9 (likely OOM)")
     assert entry["status"] == "failed"
@@ -244,9 +263,22 @@ def test_failed_entry_carries_reason():
 
 def _full_run_args(**kw):
     base = dict(
-        mode="quick", threads=None, sweep=False, cores="all", tasks=None, exclude=None,
-        repeat=2, seed=1337, cooldown=0.0, timeout=120.0, no_warmup=True, resume=False,
-        out=None, format="txt", summary=False, no_report=True,
+        mode="quick",
+        threads=None,
+        sweep=False,
+        cores="all",
+        tasks=None,
+        exclude=None,
+        repeat=2,
+        seed=1337,
+        cooldown=0.0,
+        timeout=120.0,
+        no_warmup=True,
+        resume=False,
+        out=None,
+        format="txt",
+        summary=False,
+        no_report=True,
     )
     base.update(kw)
     return argparse.Namespace(**base)

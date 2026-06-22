@@ -668,6 +668,11 @@ side-by-side comparison. It is written next to the JSON and echoed to the consol
   SCORE SUMMARY header reads `OVERALL  (threads=N, non-standard — raw times only)` and the
   category/score lines are omitted, since no reference denominator exists for an arbitrary
   thread count. The thread count is shown in the identity header as usual.
+- **Run mode ≠ baseline mode** (e.g. a `--mode quick` run against a `normal` baseline): same
+  raw-times treatment — `quick` and `normal` use different task sizes, so a cross-mode ratio is
+  meaningless. The SCORE SUMMARY header reads `OVERALL  (baseline is <mode>-mode — raw times
+  only)`, the headline shows `(mode != baseline)`, and a NOTES line records `baseline skipped:
+  reference is <mode>-mode; this run is <mode>-mode`.
 - **`--summary`** prints only the identity header and SCORE SUMMARY block (the shareable core),
   omitting the per-task table and notes.
 
@@ -695,6 +700,13 @@ dominating:
   (`threads_mode="explicit"`, neither 1 nor physical-all) has no reference denominator, so it
   is **not scored** — the run emits raw times + intra-run ratios only and the report labels it
   `threads=N (non-standard — raw times only)`.
+- **Scores require a matching mode.** `quick` and `normal` run the same task *names* at
+  **different sizes**, so a baseline only yields meaningful ratios for a run in the *same* mode.
+  `reference.json` records the `mode` it was produced in, and scoring applies the baseline only
+  when `baseline.mode == run.mode`; otherwise the run falls back to raw-times mode (above) with a
+  note explaining the skip. A baseline that predates the `mode` field is assumed `normal` (the
+  placeholder reference was a normal sweep). This mirrors `compare`, which already refuses across
+  modes.
 - **Robustness guards.** Results with `status != "ok"` or `swapped: true` are excluded; if
   exclusions leave a category empty, that category drops out of the headline and the report
   says so. The geomean is also guarded against a zero/negative per-task score (clamped /
@@ -711,6 +723,10 @@ reference machine. Key points:
   construction. That is the intended whole-machine meaning and is exactly the number we want to
   lead with. The single-core score is the figure to consult when you need to factor core count
   out and compare per-core quality; the report presents it as the secondary diagnostic.
+- **`reference.json` records the `mode` it was produced in** (alongside `reference_version`,
+  `benchmark_version`, and machine spec). Scoring applies it only to runs of the same mode;
+  a mismatched run falls back to raw-times mode (see §7.5, §8). A file without a `mode` key is
+  treated as `normal`.
 - **`reference.json` stores two per-task baseline sets:** `single_core` medians and
   `all_cores` medians (the latter captured at the reference machine's own physical-core
   count). On the test machine:

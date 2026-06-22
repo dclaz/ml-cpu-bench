@@ -31,6 +31,19 @@ brew install uv                                      # macOS (Homebrew)
 - **macOS only:** LightGBM needs an OpenMP runtime. Modern wheels usually bundle it; if
   `import lightgbm` fails, run `brew install libomp`.
 
+If LightGBM tasks fail on macOS, verify the runtime directly:
+
+```bash
+uv run python -c "import lightgbm; print(lightgbm.__version__)"
+```
+
+If this import errors with `libomp`/`dlopen`/`Library not loaded`, install OpenMP and retry:
+
+```bash
+brew install libomp
+uv sync
+```
+
 ---
 
 ## Quick start
@@ -219,15 +232,19 @@ Every run writes two files (default into `results/<run_id>.{json,txt}`):
   section). The live console table breaks pandas vs Polars onto their own rows with an
   explicit `engine` column.
 
-### Scores are deferred (raw-times mode)
+### Scores (placeholder baseline)
 
-Scores are ratios against a reference machine (`reference_machine = 100`), but
-**`baselines/reference.json` is intentionally not committed yet**. Until it is, every run shows
-**raw times and intra-run ratios only**, and the headline is omitted
-(`OVERALL (no baseline -- raw times only)`). This is by design, not a setup gap — so the numbers
-in a freshly cloned run are this machine's raw medians, not cross-machine scores. The scoring and
-report code is fully written and unit-tested against an in-repo fixture baseline; the headline
-lights up once a baseline is added.
+Scores are ratios against a reference machine (`reference_machine = 100`). A baseline now ships
+in **`baselines/reference.json`**, so a **`normal`-mode** run prints a headline and per-task
+scores. It is currently a **dev-machine placeholder** (`reference_version: D16ads_v6_8c`), **not
+for publishing comparisons** — it is replaced by a publicly-rentable cloud SKU before release (a
+`reference_version` bump). Two cases still fall back to **raw times + intra-run ratios only**,
+with the headline omitted:
+
+- **No matching baseline** — `OVERALL (no baseline -- raw times only)`.
+- **Run mode ≠ baseline mode** — e.g. `--mode quick` against the `normal` baseline; `quick` and
+  `normal` use different task sizes, so the ratio would be meaningless
+  (`OVERALL (baseline is normal-mode -- raw times only)`).
 
 ### Per-task score (once a baseline exists)
 
@@ -236,6 +253,11 @@ geomean of its per-task scores; **headline = `100 × geomean of the 6 category s
 (category-weighted). pandas and Polars are separate scored entries. The **all-cores** score is
 the headline (whole-machine throughput); **single-core** (under `--sweep`) is the secondary
 per-core diagnostic. The two are never blended.
+
+**Scores require a matching mode.** `quick` and `normal` run the same tasks at different sizes,
+so a baseline only scores runs in the mode it was produced in (`reference.json` records its
+`mode`). A `--mode quick` run against a `normal` baseline falls back to **raw times only** with a
+note — it does not print a meaningless cross-mode ratio. `compare` likewise refuses across modes.
 
 ---
 

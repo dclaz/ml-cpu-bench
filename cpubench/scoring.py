@@ -113,9 +113,20 @@ def compute_e_core_delta(by_bucket: dict[str, list[dict]]) -> dict[str, float]:
 
 
 def score_run(document: dict, baseline_path: str | None = None) -> dict:
-    """Compute the ``scores`` block for a results document (raw mode when no baseline)."""
+    """Compute the ``scores`` block for a results document (raw mode when no baseline).
+
+    Scores are only applied when the run's mode matches the mode the baseline was produced
+    in — quick and normal use different task sizes, so cross-mode ratios are meaningless. On a
+    mode mismatch we fall back to raw-times mode and flag why. A baseline that predates the
+    ``mode`` field is assumed ``normal`` (the placeholder reference was a normal sweep).
+    """
     baseline = load_baseline(baseline_path)
     ok = _ok(document.get("results", []))
+
+    run_mode = document.get("config", {}).get("mode")
+    baseline_mode = baseline.get("mode", "normal") if baseline else None
+    mode_matches = baseline is not None and baseline_mode == run_mode
+    applies = baseline is not None and mode_matches
 
     by_bucket: dict[str, list[dict]] = {}
     for r in ok:
@@ -124,13 +135,17 @@ def score_run(document: dict, baseline_path: str | None = None) -> dict:
             by_bucket.setdefault(b, []).append(r)
 
     scores: dict = {
-        "reference_present": baseline is not None,
+        # ``reference_present`` means "scores are applicable" — present AND mode-matched — so the
+        # reporting layer's raw-mode gate keeps working unchanged.
+        "reference_present": applies,
         "reference_version": baseline.get("reference_version") if baseline else None,
+        "reference_mode": baseline_mode,
+        "reference_mode_mismatch": baseline is not None and not mode_matches,
     }
 
     for bucket, records in by_bucket.items():
         entry: dict = {"raw_medians": _raw_medians(records)}
-        if baseline is not None and bucket in _SCORED_BUCKETS:
+        if applies and bucket in _SCORED_BUCKETS:
             # p_cores reuses the all_cores reference denominator.
             ref_key = "all_cores" if bucket == "p_cores" else bucket
             ref_medians = (baseline.get("baselines", {}) or {}).get(ref_key, {})
@@ -155,6 +170,7 @@ def extract_baseline(document: dict, *, reference_version: str) -> dict:
     return {
         "reference_version": reference_version,
         "benchmark_version": document.get("benchmark_version"),
+        "mode": document.get("config", {}).get("mode"),
         "machine": document.get("environment", {}),
         "baselines": baselines,
     }

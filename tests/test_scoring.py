@@ -38,6 +38,7 @@ FIXTURE_RESULTS = [
 ]
 FIXTURE_BASELINE = {
     "reference_version": "fixture-1",
+    "mode": "normal",
     "baselines": {"all_cores": {"la_gemm": 4.0, "la_solve": 4.0, "cl_kmeans": 2.0}},
 }
 
@@ -81,10 +82,23 @@ def test_score_run_raw_mode_when_no_baseline(tmp_path):
 def test_score_run_scored_with_fixture(tmp_path):
     bpath = tmp_path / "ref.json"
     bpath.write_text(json.dumps(FIXTURE_BASELINE))
-    doc = {"results": FIXTURE_RESULTS}
+    doc = {"config": {"mode": "normal"}, "results": FIXTURE_RESULTS}
     scores = scoring.score_run(doc, baseline_path=str(bpath))
     assert scores["reference_present"] is True
+    assert scores["reference_mode_mismatch"] is False
     assert scores["all_cores"]["headline"] is not None
+
+
+def test_score_run_raw_mode_on_mode_mismatch(tmp_path):
+    # quick run against a normal baseline → raw times only (different task sizes).
+    bpath = tmp_path / "ref.json"
+    bpath.write_text(json.dumps(FIXTURE_BASELINE))
+    doc = {"config": {"mode": "quick"}, "results": FIXTURE_RESULTS}
+    scores = scoring.score_run(doc, baseline_path=str(bpath))
+    assert scores["reference_present"] is False
+    assert scores["reference_mode_mismatch"] is True
+    assert scores["reference_mode"] == "normal"
+    assert scores["all_cores"].get("headline") is None
 
 
 def test_e_core_delta():
@@ -96,9 +110,22 @@ def test_e_core_delta():
     assert delta["la_gemm"] == pytest.approx(0.5)  # (2-1)/2
 
 
+def test_score_run_legacy_baseline_defaults_to_normal(tmp_path):
+    # A baseline without a "mode" key (pre-mode-field) is assumed normal-mode.
+    bpath = tmp_path / "ref.json"
+    bpath.write_text(json.dumps({k: v for k, v in FIXTURE_BASELINE.items() if k != "mode"}))
+    normal = scoring.score_run(
+        {"config": {"mode": "normal"}, "results": FIXTURE_RESULTS}, str(bpath)
+    )
+    quick = scoring.score_run({"config": {"mode": "quick"}, "results": FIXTURE_RESULTS}, str(bpath))
+    assert normal["reference_present"] is True
+    assert quick["reference_mode_mismatch"] is True
+
+
 def test_extract_baseline_from_sweep():
     doc = {
         "benchmark_version": "1.1.0",
+        "config": {"mode": "normal"},
         "results": [
             _ok("la_gemm", "linalg", 1.5),
             _ok("la_gemm", "linalg", 5.0, tm="single"),
@@ -107,3 +134,4 @@ def test_extract_baseline_from_sweep():
     out = scoring.extract_baseline(doc, reference_version="dev-1")
     assert out["baselines"]["all_cores"]["la_gemm"] == 1.5
     assert out["baselines"]["single_core"]["la_gemm"] == 5.0
+    assert out["mode"] == "normal"

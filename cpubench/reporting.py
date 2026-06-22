@@ -114,6 +114,15 @@ def _header_lines(document: dict, overall: str) -> list[str]:
     ]
 
 
+def _raw_reason(document: dict, scores: dict) -> str:
+    """Parenthetical explaining why a run shows raw times instead of scores."""
+    if document.get("config", {}).get("threads_mode") == "explicit":
+        return "threads=N, non-standard -- raw times only"
+    if scores.get("reference_mode_mismatch"):
+        return f"baseline is {scores.get('reference_mode')}-mode -- raw times only"
+    return "no baseline -- raw times only"
+
+
 def _score_summary(document: dict, scores: dict, bucket: str | None) -> list[str]:
     lines = [MINOR, " SCORE SUMMARY                                       reference = 100", MINOR]
     raw_mode = not scores.get("reference_present")
@@ -122,10 +131,10 @@ def _score_summary(document: dict, scores: dict, bucket: str | None) -> list[str
     headline = entry.get("headline")
 
     if cfg.get("threads_mode") == "explicit":
-        lines.append("   OVERALL  (threads=N, non-standard -- raw times only)")
+        lines.append(f"   OVERALL  ({_raw_reason(document, scores)})")
         return lines
     if raw_mode or headline is None:
-        lines.append("   OVERALL  (no baseline -- raw times only)")
+        lines.append(f"   OVERALL  ({_raw_reason(document, scores)})")
         return lines
 
     # --sweep: show the single-core column beside all-cores (per-core vs whole-machine).
@@ -213,8 +222,13 @@ def _per_task(document: dict, scores: dict, bucket: str | None) -> list[str]:
         sc = _2dp(per_task.get(name)) if scored else ""
         lines.append(
             prefix
-            + _cols(sc, _sig3(r.get("median_s")), _sig3(r.get("min_s")),
-                    _2dp(r.get("cv")), _rss(r.get("peak_rss_mb")))
+            + _cols(
+                sc,
+                _sig3(r.get("median_s")),
+                _sig3(r.get("min_s")),
+                _2dp(r.get("cv")),
+                _rss(r.get("peak_rss_mb")),
+            )
         )
     return lines
 
@@ -252,13 +266,12 @@ def _notes(document: dict, scores: dict, bucket: str | None) -> list[str]:
         return list(dict.fromkeys(seq))
 
     noisy = _dedup(
-        _lab(r) for r in results if r.get("status") == "ok" and not r.get("swapped")
-        and r.get("noisy")
+        _lab(r)
+        for r in results
+        if r.get("status") == "ok" and not r.get("swapped") and r.get("noisy")
     )
     failed = _dedup(_lab(r) for r in results if r.get("status") != "ok")
-    swapped = _dedup(
-        _lab(r) for r in results if r.get("status") == "ok" and r.get("swapped")
-    )
+    swapped = _dedup(_lab(r) for r in results if r.get("status") == "ok" and r.get("swapped"))
     lines = [MINOR, " NOTES"]
     lines += _wrap_list("noisy (cv>0.10):    ", noisy, "(none)")
     lines += _wrap_list("failed:             ", failed, "(none)")
@@ -267,6 +280,12 @@ def _notes(document: dict, scores: dict, bucket: str | None) -> list[str]:
     empty = entry.get("empty_categories")
     if empty:
         lines += _wrap_list("empty categories:   ", empty, "(none)")
+    if scores.get("reference_mode_mismatch"):
+        lines.append(
+            f"   baseline skipped:   reference is {scores.get('reference_mode')}-mode; this "
+            f"run is {document.get('config', {}).get('mode')}-mode"
+        )
+        lines.append("                       (different task sizes -- scores not comparable)")
     # p/e isolation note
     biased = [r for r in results if r.get("enforcement") == "biased"]
     if biased:
@@ -284,6 +303,8 @@ def render_txt(document: dict, *, summary: bool = False) -> str:
     raw_mode = not scores.get("reference_present")
     if cfg.get("threads_mode") == "explicit":
         overall = "(threads non-standard)"
+    elif scores.get("reference_mode_mismatch"):
+        overall = "(mode != baseline)"
     elif raw_mode or (scores.get(bucket, {}) or {}).get("headline") is None:
         overall = "(no baseline)"
     else:
@@ -378,9 +399,7 @@ def render_csv(document: dict) -> str:
     leg_rank = {"all-cores": 0, "P-cores": 1, "E-cores": 2, "1-core": 3}
 
     results = list(document.get("results", []))
-    results.sort(
-        key=lambda r: (order.get(r.get("task"), len(order)), leg_rank.get(_leg_tag(r), 9))
-    )
+    results.sort(key=lambda r: (order.get(r.get("task"), len(order)), leg_rank.get(_leg_tag(r), 9)))
 
     out = io.StringIO()
     writer = csv.writer(out)

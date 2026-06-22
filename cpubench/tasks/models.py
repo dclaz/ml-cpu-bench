@@ -7,6 +7,8 @@ untimed (cached across reps) and times only ``predict``.
 
 from __future__ import annotations
 
+import platform
+
 from cpubench import datasets
 from cpubench.registry import task
 from cpubench.threading_ctl import resolve_n_jobs, resolve_num_threads
@@ -19,6 +21,21 @@ _CLS_SIZES = {
     "quick": {"n_samples": 200_000, "n_features": 50, "n_classes": 3},
     "normal": {"n_samples": 800_000, "n_features": 150, "n_classes": 3},
 }
+
+
+def _import_lightgbm():
+    try:
+        import lightgbm as lgb
+
+        return lgb
+    except Exception as exc:  # pragma: no cover - platform/runtime dependent
+        msg = "LightGBM import failed."
+        if platform.system() == "Darwin":
+            msg += (
+                " On macOS, this is usually a missing OpenMP runtime. "
+                "Install it with: brew install libomp"
+            )
+        raise RuntimeError(msg) from exc
 
 
 @task("md_linreg", "models", data=datasets.regression_xy, sizes=_REG_SIZES)
@@ -154,7 +171,7 @@ def md_rf_predict(params, ctx):
     },
 )
 def md_lgbm(params, ctx):
-    import lightgbm as lgb
+    lgb = _import_lightgbm()
 
     x, y = ctx.data
     with ctx.timer():

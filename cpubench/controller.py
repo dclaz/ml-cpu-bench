@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import secrets
 import subprocess
 import sys
@@ -63,7 +64,15 @@ def _stderr_reason(returncode: int, stderr: str) -> str:
     # Last non-empty stderr line is usually the exception type + message.
     tail = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
     detail = tail[-1] if tail else "no stderr"
-    return f"worker exited {returncode}: {detail}"[:300]
+    reason = f"worker exited {returncode}: {detail}"
+    lower = (stderr or "").lower()
+    if (
+        platform.system() == "Darwin"
+        and ("lightgbm" in lower or "libomp" in lower)
+        and ("omp" in lower or "library not loaded" in lower or "dlopen" in lower)
+    ):
+        reason += " (macOS hint: install libomp with `brew install libomp`)"
+    return reason[:300]
 
 
 def _spawn(config: registry.RunConfig, topo: dict, partial_path: str) -> tuple[str, str | None]:
